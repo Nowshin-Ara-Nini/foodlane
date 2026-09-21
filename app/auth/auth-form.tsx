@@ -17,6 +17,7 @@ export default function AuthForm({ screen }: { screen: Screen }) {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
+  const [signupRole, setSignupRole] = useState('buyer');
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setMessage('');
     const form = new FormData(event.currentTarget);
@@ -26,9 +27,9 @@ export default function AuthForm({ screen }: { screen: Screen }) {
     try {
       if (screen === 'login') {
         await call('sign-in/email', { email, password });
-        window.location.assign(safeReturnPath(query.get('returnTo')));
+        window.location.assign('/auth/choose-role?returnTo=' + encodeURIComponent(safeReturnPath(query.get('returnTo'))));
       } else if (screen === 'signup') {
-        const data = await call('sign-up/email', { email, password, name: form.get('name'), callbackURL: '/auth/login' });
+        const data = await call('sign-up/email', { email, password, name: form.get('name'), signupRole, callbackURL: '/auth/login' });
         setMessage(data.message ?? 'Check your email.'); setDone(true);
       } else if (screen === 'forgot-password') {
         const data = await call('request-password-reset', { email, redirectTo: window.location.origin + '/auth/reset-password' });
@@ -52,7 +53,7 @@ export default function AuthForm({ screen }: { screen: Screen }) {
     setBusy(true); setError('');
     try {
       const query = new URLSearchParams(window.location.search);
-      const data = await call('sign-in/social', { provider: 'google', callbackURL: window.location.origin + safeReturnPath(query.get('returnTo')), errorCallbackURL: window.location.origin + '/auth/login' });
+      const data = await call('sign-in/social', { provider: 'google', callbackURL: window.location.origin + '/auth/choose-role?returnTo=' + encodeURIComponent(safeReturnPath(query.get('returnTo'))), errorCallbackURL: window.location.origin + '/auth/login' });
       if (!data.url) throw new Error('Google sign-in is not configured yet.');
       window.location.assign(data.url);
     } catch (error) { setError(error instanceof Error ? error.message : 'Please try again.'); setBusy(false); }
@@ -64,6 +65,7 @@ export default function AuthForm({ screen }: { screen: Screen }) {
       {message && <p role="status" className="notice">{message}</p>}
       {!done && <form onSubmit={submit} className="stack mt-5">
         {screen === 'signup' && <label className="field">Display name<input name="name" required maxLength={100} autoComplete="name" /></label>}
+        {screen === 'signup' && <label className="field">Account type<select value={signupRole} onChange={event => setSignupRole(event.target.value)}><option value="buyer">Buyer — browse, review and show interest</option><option value="seller">Seller — apply to list food (18+)</option></select><small>Seller accounts cannot leave buyer reviews. New Google accounts choose their role after Google sign-in.</small></label>}
         {!['verify', 'reset-password'].includes(screen) && <label className="field">Email<input name="email" type="email" required maxLength={254} autoComplete="email" /></label>}
         {['login', 'signup', 'reset-password'].includes(screen) && <label className="field">Password<input name="password" type="password" required minLength={screen === 'login' ? 1 : 12} maxLength={128} autoComplete={screen === 'login' ? 'current-password' : 'new-password'} />{screen !== 'login' && <small>Use 12–128 characters.</small>}</label>}
         {screen === 'verify' && <p>Confirm your email address to activate your account. This link can be used once and expires after one hour.</p>}

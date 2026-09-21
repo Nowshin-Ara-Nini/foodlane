@@ -14,9 +14,11 @@ Copy `.dev.vars.example` to `.dev.vars`, supply a random auth secret, and config
 
 ```sh
 npm run db:migrate:local
+node scripts/configure-private-local.mjs
 npm run dev
 npm run typecheck
 npm run test:auth
+npm run test:roles
 npm run build
 ```
 
@@ -31,6 +33,9 @@ npm run db:migrate:local
 npm run db:migrate:remote
 ```
 
-Wrangler tracks applied migrations. Fresh databases apply 0000–0004 in order. Do not import legacy ChatGPT identities or plaintext test evidence.
+Wrangler tracks applied migrations. Fresh databases apply 0000–0005 in order. Do not import legacy ChatGPT identities or plaintext test evidence.
 
 The application no longer uses Sites authentication or mock identity headers. `.openai/hosting.json` is historical and is not imported by the build. Existing `scripts/sites-env.mjs` only configures local tool-state locations.
+
+
+Step 3 private-data setup, retention operations and deployment checks: [PRIVATE_DATA_RUNBOOK.md](PRIVATE_DATA_RUNBOOK.md). Run `npm run test:privacy` for privacy tests and, after building, `npm run verification:cleanup:local` to dispatch local cleanup. Migration 0006 replaces legacy plaintext test verification and disables legacy unsanitized food photos; do not use it as a migration for real historical identity data.

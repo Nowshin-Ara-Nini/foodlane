@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "foodlane",
-  "main": "vinext/server/fetch-handler",
+  "main": "worker.ts",
   "compatibility_date": "2026-05-15",
   "compatibility_flags": ["nodejs_compat"],
   // Deliberately not publicly routable during the six implementation checkpoints.
@@ -13,9 +13,17 @@
     "database_id": "00000000-0000-4000-8000-000000000000",
     "migrations_dir": "drizzle"
   }],
-  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "foodlane-media" }],
+  "r2_buckets": [
+    { "binding": "BUCKET", "bucket_name": "foodlane-media" },
+    { "binding": "PRIVATE_VERIFICATIONS", "bucket_name": "foodlane-private-verifications" }
+  ],
+  "images": { "binding": "IMAGES" },
+  "triggers": { "crons": ["0 3 * * *"] },
   "vars": {
     "AUTH_BASE_URL": "https://foodlane.invalid",
-    "AUTH_ALLOW_LOCAL_HTTP": "false"
+    "AUTH_ALLOW_LOCAL_HTTP": "false",
+    "VERIFICATION_RETENTION_ENABLED": "true",
+    "VERIFICATION_RETENTION_DAYS": "30",
+    "NID_KEY_VERSION": "v1"
   }
 }

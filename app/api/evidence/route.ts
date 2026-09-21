@@ -1,3 +1,6 @@
-import {getUser} from '../../auth-session';
-import {database,bucket,reviewer} from '../../../db/raw';
-export async function GET(req:Request){const user=await getUser();if(!user)return new Response('Sign in required',{status:401});try{const key=new URL(req.url).searchParams.get('key');const record=await database().prepare('SELECT s.owner FROM verifications v JOIN sellers s ON s.id=v.seller_id WHERE v.identity_key=? OR v.selling_key=? OR v.passport_key=?').bind(key,key,key).first();if(!record||(!reviewer(user.email)&&record.owner!==user.userId))return new Response('Not found',{status:404});const object=await bucket().get(key!);if(!object)return new Response('Not found',{status:404});return new Response(object.body,{headers:{'Content-Type':object.httpMetadata?.contentType??'application/octet-stream','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}})}catch{return new Response('Evidence unavailable',{status:503})}}
+﻿import { getUser } from '../../auth-session';
+export async function GET() {
+  const user = await getUser();
+  if (!user || user.role !== 'admin' || !user.roleChosen) return new Response('Admin access required.', { status: 403 });
+  return new Response('Use the admin document route with a submission ID.', { status: 410, headers: { 'Cache-Control': 'private, no-store' } });
+}

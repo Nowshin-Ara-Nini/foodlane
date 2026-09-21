@@ -4,9 +4,9 @@
 
 Implement one step at a time. After each, report changes, checks, limitations and migrations, then wait for explicit owner approval. Do not activate the replacement publicly until all six checkpoints and deployment checks pass.
 
-1. Authentication: current checkpoint.
-2. Server-side roles and adult seller eligibility: not started.
-3. Private verification, consent, image sanitization and retention: not started.
+1. Authentication: implemented locally; approved to proceed to step 2.
+2. Server-side roles and adult seller eligibility: implemented; approved to proceed to step 3.
+3. Private verification, consent, image sanitization and retention: implemented locally; current approval checkpoint.
 4. Admin review, mandatory MFA and audit panel: not started.
 5. Maps, near-me, seller-level interest/reviews: not started.
 6. Abuse protection, account deletion and privacy policy: not started.
@@ -28,7 +28,7 @@ Account screens: `/auth/login`, `/auth/signup`, `/auth/forgot-password`, `/auth/
 
 ## Migration
 
-`drizzle/0004_auth_roles.sql` adds auth users, accounts, sessions, verification tokens, rate-limit counters and verification-link digests. Despite its planned name, role/MFA fields are deferred to their approved steps, using later additive migrations rather than rewriting an applied migration.
+`drizzle/0004_auth_roles.sql` adds auth users, accounts, sessions, verification tokens, rate-limit counters and verification-link digests. Role fields are added by `0005_role_permissions.sql`; MFA fields remain deferred to step 4. Applied migrations are never rewritten.
 
 ```sh
 npm run db:migrate:local
@@ -50,7 +50,7 @@ Production setup:
 3. Generate a cryptographically random BETTER_AUTH_SECRET of at least 32 characters; store it with `wrangler secret put BETTER_AUTH_SECRET`. Never use the example secret.
 4. Verify a Resend sender domain and set RESEND_API_KEY and AUTH_EMAIL_FROM.
 5. Create Google OAuth Web credentials with callback `https://YOUR_DOMAIN/api/auth/callback/google` and a loopback callback for development; set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.
-6. REVIEWER_EMAIL is transitional behavior until roles/MFA replace it. Do not collect real verification evidence at this checkpoint.
+6. Provision admins by verified account ID using the operator command below. REVIEWER_EMAIL is no longer supported. Do not collect real verification evidence before the private-storage and MFA steps.
 7. Build, migrate and finish all six approvals before activating a public route.
 
 ## Password CPU release gate
@@ -82,4 +82,68 @@ Step-1 results:
 - Production build passes. Local migrations 0000–0004 applied successfully.
 - Built-app HTTP smoke checks pass for all six account pages, the anonymous seller redirect, removed ChatGPT route and homepage links.
 - Visual/interactive browser checks are pending because no browser is connected. Real Resend delivery, Google OAuth completion and deployed CPU/plan validation are pending external configuration.
-- No deployment or remote migration was performed. Steps 2–6 have not started; their acceptance tests are not claimed complete.
+- No deployment or remote migration was performed in step 1; later-step acceptance was not claimed complete.
+
+## Step 2: roles, permissions and eligibility
+
+Every active application API resolves a verified D1 session and reads the current account role from D1. The API never trusts role headers, submitted user IDs, or cookie-cached roles. Cross-role requests return 403 before private queries, body parsing, or storage access.
+
+- Email signup offers buyer/seller selection. Admin is never a public signup option; role/roleChosen mass-assignment fields are rejected.
+- New Google users complete a one-time role choice after identity verification, bound to their authenticated session. Until that choice is saved, buyer/seller/admin operations are denied. A conditional D1 update prevents concurrent choices or later role switching.
+- Existing step-1 accounts are backfilled to seller if they own a seller profile, otherwise buyer. Existing unverified sellers become pending. New profiles start pending and remain hidden.
+- Seller profile/food changes and photo access derive ownership from the current session. Submitted ownership/status fields are rejected; another seller's food ID returns 403.
+- Only buyers may use interest/review routes. These remain per-food in this checkpoint; step 5 changes their uniqueness to per-seller.
+- Only admins can access pending verification details, documents and decisions. Document owners are denied alongside all other sellers. Document routes take submission ID/kind rather than storage keys and use private, no-store responses.
+- Public catalogue and seller dashboard use explicit projections. Personal contact details, NID/home data and stored document keys are excluded. Seller submissions expose status/timestamps/rejection reason only. Public serving-location text is named place_label, distinct from home_address.
+- Age must be a whole number between 18 and 120, checked in the browser and server before image bytes are processed/stored. Approval requires the reviewer to explicitly confirm adult eligibility. Submitted age below 18 or evidence marked underage forces rejection; an adult checkbox cannot override an underage submitted age.
+- `/seller`, `/review` and `/admin` are server-guarded. Wrong-role accounts redirect to `/forbidden` without receiving protected content. `/admin` temporarily redirects authorized admins to the existing review desk; the full panel/MFA arrives in step 4.
+
+### API contracts
+
+| Routes | Access |
+|---|---|
+| GET `/api/public/catalogue`, `/api/public/photos/{foodId}` | Public; approved sellers and available food only |
+| GET `/api/account/me`, POST `/api/account/role` | Verified account; role choice allowed once |
+| GET `/api/buyer/interests`, POST `/api/buyer/interest`, `/api/buyer/review` | Buyer only |
+| GET `/api/seller/dashboard`, POST `/api/seller/profile`, `/api/seller/food`, `/api/seller/verification`, `/api/seller/photos` | Seller only; writes scoped to own data |
+| GET `/api/seller/photos/{uploadId}` | Owning seller only |
+| GET `/api/admin/verifications`, `/api/admin/verifications/{id}/documents/{kind}`, POST `/api/admin/decision` | Admin only; kinds: identity, passport, selling |
+
+Legacy `/api/data`, `/api/action` and `/api/photo` return 410. Legacy `/api/evidence` returns 403 to non-admins and 410 to admins. The client now uses the separate routes. JSON mutations require same origin and strict validation; upload bodies have enforced byte limits.
+
+### Migration and admin provisioning
+
+`drizzle/0005_role_permissions.sql` adds roles and one-time onboarding state, updates the seller default/backfill to pending, and preserves existing seller/food foreign-key relationships. It has been applied locally. Production remains untouched.
+
+```sh
+npm run db:migrate:local
+# After configuring the intended database:
+npm run db:migrate:remote
+
+# Use the ID of an existing, email-verified account:
+npm run admin:provision -- --local VERIFIED_USER_ID
+# Operator-controlled production equivalent:
+npm run admin:provision -- --remote VERIFIED_USER_ID
+```
+
+Provisioning validates the ID, promotes only verified accounts, revokes existing sessions, and requires another sign-in. It does not create accounts or verify email on someone's behalf. No admin account was provisioned outside disposable test data.
+
+### Checks and limits
+
+- All 18 auth/role integration tests pass in local workerd with D1/R2, including ownership, role spoofing, stale sessions, all non-admin document denials, underage rejection before storage, private response projections, existing-data migration, one-time onboarding and verified-only admin provisioning.
+- TypeScript and production build pass. New server/auth/role modules have no lint errors. Legacy Foodlane/verification UI still has lint findings.
+- Built-app HTTP smoke checks pass: anonymous protected APIs return 403, retired endpoints return 410, public catalogue returns 200, protected pages redirect to login, and all six account screens still render. Full-project lint currently reports 23 legacy UI errors and 8 warnings; no new server-module lint errors.
+- Storage is still the pre-existing shared bucket and the legacy verification table still stores NID plaintext. Private R2 separation, encryption, sanitization, retention and full auditing require step 3. MFA requires step 4. Reports and account deletion require step 6. This checkpoint is not authorization to deploy or collect real identity documents.
+- Google OAuth completion, real email delivery, deployed CPU validation and interactive browser checks remain pending external configuration/browser availability.
+- Next implementation step requires explicit owner approval. Future migrations will continue after 0005 rather than reuse applied numbers.
+
+
+## Step 3 checkpoint
+
+Private verification, AES-256-GCM encryption, private R2 binding, all-image sanitization, independent consent, audited access and daily retryable retention are implemented. See [PRIVATE_DATA_RUNBOOK.md](PRIVATE_DATA_RUNBOOK.md) for changes, checks, remaining deployment limitations and exact configuration commands.
+
+New migration: `0006_private_verification.sql` (applied locally). It follows the already-applied `0005_role_permissions`; future engagement work must use 0007 or later. The approved fresh-data cutover drops legacy plaintext verification tables after queueing their files for deletion, resets legacy seller approval and disables unsanitized legacy food images. No remote migration or deployment was performed.
+
+30 tests, TypeScript, production build, built HTTP smoke checks and direct dispatch of the built scheduled handler pass. Existing whole-project lint issues remain; newly added server modules/scripts/tests are clean. Production bucket privacy, deployed Images/CPU/cron behavior and interactive browser journeys remain to be checked. Mandatory admin MFA and its denial tests belong to step 4. Account deletion's internal cleanup primitive is tested; the reauthenticated user endpoint belongs to step 6.
+
+Step 4 has not started. Wait for explicit owner approval.

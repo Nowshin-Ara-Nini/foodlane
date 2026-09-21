@@ -1,0 +1,23 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { mkdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+test('verification form shows the pickup-point notice and independent unchecked consent controls',async()=>{
+  const require=createRequire(import.meta.url),wr=createRequire(require.resolve('wrangler/package.json'));
+  await mkdir('.wrangler/consent-tests',{recursive:true});
+  await wr('esbuild').build({entryPoints:['app/verification-form.tsx'],bundle:true,outfile:'.wrangler/consent-tests/form.mjs',format:'esm',platform:'node',packages:'external',jsx:'automatic'});
+  const {default:Form}=await import(pathToFileURL(resolve('.wrangler/consent-tests/form.mjs')));
+  const html=renderToStaticMarkup(React.createElement(Form,{busy:false,save:async()=>true,seller:{lat:23,lng:90,place_label:'Pickup point'}}));
+  assert.match(html,/nearby pickup point instead of your home/);
+  const location=html.match(/<input[^>]*name="locationConsent"[^>]*>/)?.[0];
+  const portrait=html.match(/<input[^>]*name="portraitConsent"[^>]*>/)?.[0];
+  assert.ok(location);assert.ok(portrait);
+  assert.match(location,/required/);assert.doesNotMatch(location,/checked/);
+  assert.doesNotMatch(portrait,/required|checked/);
+  assert.match(html,/Display my passport-size photo on my public seller profile after approval/);
+  assert.doesNotMatch(html,/image\/webp/);
+});

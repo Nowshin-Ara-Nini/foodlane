@@ -15,7 +15,12 @@
     "test:auth": "node --test tests/auth.test.mjs",
     "typecheck": "tsc --noEmit",
     "db:migrate:local": "node scripts/db-migrate.mjs --local",
-    "db:migrate:remote": "node scripts/db-migrate.mjs --remote"
+    "db:migrate:remote": "node scripts/db-migrate.mjs --remote",
+    "test:roles": "node --test tests/roles.test.mjs",
+    "test": "node --test tests/auth.test.mjs tests/roles.test.mjs tests/image-sanitization.test.mjs tests/consent-ui.test.mjs",
+    "admin:provision": "node scripts/provision-admin.mjs",
+    "test:privacy": "node --test tests/roles.test.mjs tests/image-sanitization.test.mjs tests/consent-ui.test.mjs",
+    "verification:cleanup:local": "node scripts/cleanup-local.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -43,7 +48,7 @@
     "sonner": "^2.0.8",
     "tailwind-merge": "3.6.0",
     "vaul": "^1.1.2",
-    "zod": "^3.25.76"
+    "zod": "^4.6.4"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

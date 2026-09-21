@@ -24,7 +24,7 @@ function cookieFrom(response) { return response.headers.getSetCookie().map(cooki
 before(async () => {
   await mkdir('.wrangler/auth-tests', { recursive: true });
   await build({ entryPoints: ['tests/auth-worker.ts'], bundle: true, outfile: '.wrangler/auth-tests/worker.mjs', format: 'esm', platform: 'neutral', conditions: ['workerd', 'worker', 'browser'], mainFields: ['module', 'main'], external: ['node:*'], define: { 'process.env.NODE_ENV': '"test"' } });
-  mf = new Miniflare({ modules: true, scriptPath: '.wrangler/auth-tests/worker.mjs', compatibilityDate: '2026-05-15', compatibilityFlags: ['nodejs_compat'], d1Databases: ['DB'], bindings: {
+  mf = new Miniflare({ modules: true, scriptPath: '.wrangler/auth-tests/worker.mjs', compatibilityDate: '2026-05-15', compatibilityFlags: ['nodejs_compat'], d1Databases: ['DB'], r2Buckets: ['BUCKET'], bindings: {
     AUTH_BASE_URL: origin, BETTER_AUTH_SECRET: 'test-only-secret-with-more-than-thirty-two-characters', RESEND_API_KEY: 'fake', AUTH_EMAIL_FROM: 'test@foodlane.test',
     GOOGLE_CLIENT_ID: 'test-google-client', GOOGLE_CLIENT_SECRET: 'test-google-secret',
   } });

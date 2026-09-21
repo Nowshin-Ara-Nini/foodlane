@@ -6,5 +6,10 @@ RESEND_API_KEY=
 AUTH_EMAIL_FROM=Foodlane <accounts@your-verified-domain.example>
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
-# Transitional reviewer configuration; replaced by roles/MFA in later steps.
-REVIEWER_EMAIL=
+
+# Generate a local-only key with: node scripts/configure-private-local.mjs
+# Store the production JSON key ring using wrangler secret put NID_ENCRYPTION_KEYS.
+# NID_ENCRYPTION_KEYS='{"v1":"BASE64_OF_32_RANDOM_BYTES"}'
+NID_KEY_VERSION=v1
+VERIFICATION_RETENTION_ENABLED=true
+VERIFICATION_RETENTION_DAYS=30

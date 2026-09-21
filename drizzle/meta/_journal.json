@@ -36,6 +36,20 @@
       "when": 1789919229080,
       "tag": "0004_auth_roles",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789970562800,
+      "tag": "0005_role_permissions",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1789990738941,
+      "tag": "0006_private_verification",
+      "breakpoints": true
     }
   ]
 }
