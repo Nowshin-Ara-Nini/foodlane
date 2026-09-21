@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1789829340472,
+      "tag": "0000_black_bastion",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789830727534,
+      "tag": "0001_shiny_king_bedlam",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789831803375,
+      "tag": "0002_easy_bloodscream",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1789832762780,
+      "tag": "0003_shiny_chamber",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1789919229080,
+      "tag": "0004_auth_roles",
+      "breakpoints": true
+    }
+  ]
+}

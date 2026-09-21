@@ -1,0 +1,10 @@
+# Copy to .dev.vars for loopback development. Never commit real secrets.
+AUTH_BASE_URL=http://localhost:5173
+AUTH_ALLOW_LOCAL_HTTP=true
+BETTER_AUTH_SECRET=replace-with-a-random-secret-of-at-least-32-characters
+RESEND_API_KEY=
+AUTH_EMAIL_FROM=Foodlane <accounts@your-verified-domain.example>
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# Transitional reviewer configuration; replaced by roles/MFA in later steps.
+REVIEWER_EMAIL=

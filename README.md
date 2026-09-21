@@ -1,0 +1,36 @@
+﻿# Foodlane
+
+Existing food-discovery app: React 19, TypeScript, Vinext/Vite, Tailwind, shadcn/ui, Lucide, Cloudflare Workers, D1/Drizzle and R2. See [FOODLANE.md](FOODLANE.md) for upgrade checkpoints and configuration.
+
+## Local setup
+
+Use Node >=22.13 and pnpm 11.25.0. On Windows use npm.cmd/npx.cmd if PowerShell blocks script shims.
+
+```sh
+npx --yes pnpm@11.25.0 install --frozen-lockfile
+```
+
+Copy `.dev.vars.example` to `.dev.vars`, supply a random auth secret, and configure Resend and Google credentials. Never commit `.dev.vars`. The dev origin is http://localhost:5173; AUTH_BASE_URL must exactly match it. HTTP is allowed only for explicit loopback development.
+
+```sh
+npm run db:migrate:local
+npm run dev
+npm run typecheck
+npm run test:auth
+npm run build
+```
+
+The built preview uses Wrangler's printed port; update the local base URL when changing ports. Wrangler configuration is in `wrangler.jsonc`. Public deployment is disabled during the six-step upgrade. Replace its D1 placeholder before remote operations.
+
+## Migrations
+
+```sh
+npm run db:generate
+npm run db:migrate:local
+# Only after preparing the intended Cloudflare database:
+npm run db:migrate:remote
+```
+
+Wrangler tracks applied migrations. Fresh databases apply 0000–0004 in order. Do not import legacy ChatGPT identities or plaintext test evidence.
+
+The application no longer uses Sites authentication or mock identity headers. `.openai/hosting.json` is historical and is not imported by the build. Existing `scripts/sites-env.mjs` only configures local tool-state locations.
