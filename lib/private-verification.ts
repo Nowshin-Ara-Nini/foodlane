@@ -61,10 +61,10 @@ export async function submitVerification(env: PrivateEnvironment, sellerId: stri
     const result = await env.DB.batch([
       env.DB.prepare(`INSERT INTO seller_verifications
         (id,seller_id,legal_name,age,gender,personal_email,personal_phone,home_address,nid_ciphertext,nid_iv,nid_key_version,place_address,place_lat,place_lng,note,status,created,location_notice_version,location_accepted_at,portrait_consent,portrait_consent_at)
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,? WHERE EXISTS (SELECT 1 FROM sellers JOIN auth_users ON auth_users.id=sellers.owner WHERE sellers.id=? AND sellers.owner=? AND sellers.status!='verified')`)
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,? WHERE EXISTS (SELECT 1 FROM sellers JOIN auth_users ON auth_users.id=sellers.owner WHERE sellers.id=? AND sellers.owner=? AND sellers.status!='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id))`)
         .bind(id,sellerId,data.legalName,data.age,data.gender,data.personalEmail,data.personalPhone,data.homeAddress,encrypted.ciphertext,encrypted.iv,encrypted.version,data.placeAddress,data.placeLat,data.placeLng,data.note,now,LOCATION_NOTICE_VERSION,now,consent?1:0,consent?now:null,sellerId,userId),
       env.DB.prepare("UPDATE verification_files SET state='attached',delete_after=NULL WHERE submission_id=? AND state='staging' AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=?)").bind(id,id),
-      env.DB.prepare("UPDATE sellers SET status='pending' WHERE id=? AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=?)").bind(sellerId,id),
+      env.DB.prepare("UPDATE sellers SET status='pending' WHERE id=? AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=?)").bind(sellerId,id),
       env.DB.prepare("INSERT INTO audit_log (id,subject,action,created_at) SELECT ?,seller_id,'submitted',? FROM seller_verifications WHERE id=?").bind(crypto.randomUUID(),now,id),
     ]);
     if (!result[0].meta.changes) throw new HttpError(409, 'Account or submission changed. Please refresh.');
@@ -108,7 +108,7 @@ export function mediaResponse(object: R2ObjectBody) {
 }
 export async function publicVerificationMedia(env: PrivateEnvironment, sellerId: string, kind: 'portrait' | 'public-place') {
   const row = await env.DB.prepare(`SELECT f.object_key FROM verification_files f JOIN seller_verifications v ON v.id=f.submission_id JOIN sellers s ON s.id=v.seller_id
-    WHERE s.id=? AND s.status='verified' AND v.status='verified' AND f.kind=? AND f.bucket='media' AND f.state='attached'
+    WHERE s.id=? AND s.status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions sx WHERE sx.seller_id=s.id) AND v.status='verified' AND f.kind=? AND f.bucket='media' AND f.state='attached'
     AND f.delete_after IS NULL AND (?!='portrait' OR (v.portrait_consent=1 AND v.portrait_withdrawn_at IS NULL)) ORDER BY v.reviewed_at DESC LIMIT 1`)
     .bind(sellerId,kind,kind).first<{ object_key: string }>();
   if (!row) throw new HttpError(404, 'Photo unavailable.');
@@ -145,7 +145,7 @@ export async function decideVerification(env: PrivateEnvironment, adminId: strin
   const statements = [
     env.DB.prepare("UPDATE seller_verifications SET status=?,reviewed_by=?,reviewed_at=?,decision_note=?,decision_id=?,retention_due_at=? WHERE id=? AND status='pending'")
       .bind(status,adminId,now,underage?'Applicants must be at least 18 years old.':data.note,decision,due,v.id),
-    env.DB.prepare(`UPDATE sellers SET status=?,updated=?,address=(SELECT place_address FROM seller_verifications WHERE id=?),lat=(SELECT place_lat FROM seller_verifications WHERE id=?),lng=(SELECT place_lng FROM seller_verifications WHERE id=?) WHERE id=? AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`)
+    env.DB.prepare(`UPDATE sellers SET status=CASE WHEN EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) THEN 'suspended' ELSE ? END,updated=?,address=(SELECT place_address FROM seller_verifications WHERE id=?),lat=(SELECT place_lat FROM seller_verifications WHERE id=?),lng=(SELECT place_lng FROM seller_verifications WHERE id=?) WHERE id=? AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`)
       .bind(status,now,v.id,v.id,v.id,v.seller_id,v.id,decision),
     env.DB.prepare(`UPDATE verification_files SET delete_after=? WHERE submission_id=? AND state='attached' AND (?='rejected' OR kind='nid') AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`).bind(due,v.id,status,v.id,decision),
     env.DB.prepare(`INSERT INTO audit_log(id,subject,action,admin_ref,created_at) SELECT ?,seller_id,?,?,? FROM seller_verifications WHERE id=? AND decision_id=?`).bind(crypto.randomUUID(),status,adminId,now,v.id,decision),

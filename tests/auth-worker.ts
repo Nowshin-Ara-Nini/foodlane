@@ -23,8 +23,12 @@ const worker = {
       return Response.json({ok:true});
     }
     if (path === '/test/cleanup') {
-      const data = await request.json() as {now?:string;fail?:boolean};
-      return Response.json(await cleanupVerificationFiles(data.fail?{...env,PRIVATE_VERIFICATIONS:undefined}:env,data.now));
+      const data = await request.json() as {now?:string;fail?:boolean;accountDeleteRace?:boolean};
+      const racedBucket={delete:async(key:string)=>{
+        await env.DB.prepare("UPDATE verification_files SET kind='account-delete' WHERE object_key=?").bind(key).run();
+        await env.PRIVATE_VERIFICATIONS!.delete(key);
+      }} as unknown as R2Bucket;
+      return Response.json(await cleanupVerificationFiles(data.fail?{...env,PRIVATE_VERIFICATIONS:undefined}:data.accountDeleteRace?{...env,PRIVATE_VERIFICATIONS:racedBucket}:env,data.now));
     }
     if (path === '/test/delete-account') {
       const data = await request.json() as {userId:string;fail?:boolean};
@@ -41,7 +45,7 @@ const worker = {
       return Response.json({ valid: await verifyPassword({ hash, password: 'Benchmark-only password 2026' }) });
     }
     if (path.startsWith('/api/auth/')) return handleAuth(request, env, createAuth(env, async (message) => { mail.push(message); }));
-    return handleFoodlane(request, env);
+    return handleFoodlane(request, request.headers.get('x-test-fail-storage')==='1'?{...env,PRIVATE_VERIFICATIONS:undefined}:env, async(message)=>{mail.push(message);});
   },
 };
 export default worker;

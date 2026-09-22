@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -33,6 +34,21 @@ async function account(name, signupRole = 'buyer') {
   assert.equal(user.role, signupRole); assert.equal(user.role_chosen, 1);
   return { id: user.id, cookie };
 }
+function otp(secret,counter=Math.floor(Date.now()/30000)) {
+  const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let bits=0,value=0;const bytes=[];
+  for(const c of secret){value=(value<<5)|alphabet.indexOf(c);bits+=5;if(bits>=8){bits-=8;bytes.push((value>>>bits)&255);}}
+  const message=Buffer.alloc(8);message.writeBigUInt64BE(BigInt(counter));const hash=createHmac('sha1',Buffer.from(bytes)).update(message).digest();const offset=hash[19]&15;
+  return String((hash.readUInt32BE(offset)&0x7fffffff)%1000000).padStart(6,'0');
+}
+async function enroll(a) {
+  const setup=await request('/api/admin/mfa/enroll',a.cookie,{});assert.equal(setup.status,200,await setup.clone().text());
+  a.secret=(await setup.json()).secret;
+  a.enrollmentCode=otp(a.secret);
+  const confirm=await request('/api/admin/mfa/confirm',a.cookie,{code:a.enrollmentCode});assert.equal(confirm.status,200,await confirm.clone().text());
+  a.recoveryCodes=(await confirm.json()).recoveryCodes;return a;
+}
+async function newAdmin(name) {const a=await account(name);await db.prepare("UPDATE auth_users SET role='admin' WHERE id=?").bind(a.id).run();return a;}
+async function loginAgain(name) {const r=await request('/api/auth/sign-in/email','',{email:`${name}@example.com`,password:'A test-only strong password 42'});assert.equal(r.status,200);return r.headers.getSetCookie().map(c=>c.split(';')[0]).join('; ');}
 async function seedSeller(account, id, status) {
   await db.prepare('INSERT INTO sellers VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(id,account.id,id,'private-phone', 'Food','Public pickup point',23.74,90.37,'Noon',status,new Date().toISOString()).run();
   const photo = `food/${id}/11111111-1111-4111-8111-111111111111.png`;
@@ -57,12 +73,19 @@ before(async () => {
       await db.prepare("INSERT INTO sellers VALUES('legacy-seller','legacy-user','Legacy','','Food','Pickup',23,90,'Noon','unverified','2026-01-01')").run();
       await db.prepare("INSERT INTO foods VALUES('legacy-food','legacy-seller','Rice','Fresh',100,'Other','old-key',1)").run();
     }
+    if(file.startsWith('0008_')){
+      await db.prepare("INSERT INTO auth_users(id,name,email,email_verified,role,role_chosen,created_at,updated_at) VALUES('legacy-buyer','Buyer','migration@example.com',1,'buyer',1,0,0)").run();
+      await db.prepare("INSERT INTO foods VALUES('legacy-food-2','legacy-seller','Rice 2','Fresh',100,'Other','',0)").run();
+      await db.prepare("INSERT INTO interests VALUES('legacy-food','legacy-buyer'),('legacy-food-2','legacy-buyer')").run();
+      await db.prepare("INSERT INTO reviews VALUES('legacy-food','legacy-buyer','Buyer',1,'Earlier','2026-01-01'),('legacy-food-2','legacy-buyer','Buyer',5,'Latest','2026-01-02')").run();
+    }
     const sql = await readFile('drizzle/' + file, 'utf8');
     await db.batch(sql.split(';').map(s => s.replaceAll('--> statement-breakpoint', '').trim()).filter(Boolean).map(s => db.prepare(s)));
   }
   buyer = await account('rolebuyer'); sellerA = await account('sellera','seller'); sellerB = await account('sellerb','seller');
   pendingSeller = await account('pending','seller'); admin = await account('admin');
   await db.prepare("UPDATE auth_users SET role='admin' WHERE id=?").bind(admin.id).run();
+  await enroll(admin);
   await seedSeller(sellerA,'seller-a','verified'); await seedSeller(sellerB,'seller-b','verified'); await seedSeller(pendingSeller,'seller-pending','pending');
   await submission('pending-verification','seller-pending');
 });
@@ -73,6 +96,13 @@ test('role migration preserves referenced legacy data and assigns least-privileg
   assert.equal((await db.prepare("SELECT status FROM sellers WHERE id='legacy-seller'").first()).status,'pending');
   assert.equal((await db.prepare("SELECT seller_id FROM foods WHERE id='legacy-food'").first()).seller_id,'legacy-seller');
   assert.equal((await db.prepare('PRAGMA foreign_key_check').all()).results.length,0);
+});
+
+test('engagement migration merges food interests and keeps the latest review per buyer per seller',async()=>{
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM seller_interests WHERE seller_id='legacy-seller'").first()).n,1);
+  assert.deepEqual(await db.prepare("SELECT rating,body,created,updated FROM seller_reviews WHERE seller_id='legacy-seller'").first(),{rating:5,body:'Latest',created:'2026-01-02',updated:'2026-01-02'});
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM interests').first()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM reviews').first()).n,0);
 });
 
 test('authorization matrix: public reads; buyer/seller/admin routes fail closed', async () => {
@@ -87,11 +117,11 @@ test('authorization matrix: public reads; buyer/seller/admin routes fail closed'
     assert.equal((await request('/api/seller/photos',cookie,new FormData())).status,403);
   }
   for (const cookie of ['',sellerA.cookie,admin.cookie]) {
-    assert.equal((await request('/api/buyer/interest',cookie,{foodId:'food-seller-a',interested:true})).status,403);
-    assert.equal((await request('/api/buyer/review',cookie,{foodId:'food-seller-a',rating:5,name:'Test',body:'Good'})).status,403);
+    assert.equal((await request('/api/buyer/interest',cookie,{sellerId:'seller-a'})).status,403);
+    assert.equal((await request('/api/buyer/review',cookie,{sellerId:'seller-a',rating:5,body:'Good'})).status,403);
   }
-  assert.equal((await request('/api/buyer/interest',buyer.cookie,{foodId:'food-seller-a',interested:true})).status,200);
-  assert.equal((await request('/api/buyer/review',buyer.cookie,{foodId:'food-seller-a',rating:5,name:'Test',body:'Good'})).status,200);
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{sellerId:'seller-a'})).status,200);
+  assert.equal((await request('/api/buyer/review',buyer.cookie,{sellerId:'seller-a',rating:5,body:'Good'})).status,200);
   assert.equal((await request('/api/admin/verifications',admin.cookie)).status,200);
   const image = await request('/api/admin/verifications/pending-verification/documents/identity',admin.cookie);
   assert.equal(image.status,200); assert.equal(image.headers.get('cache-control'),'private, no-store'); assert.equal(image.headers.get('content-type'),'image/png');
@@ -106,7 +136,7 @@ test('public and seller projections exclude private data and stored keys', async
   assert.doesNotMatch(JSON.stringify(publicData),forbidden); assert.doesNotMatch(JSON.stringify(dashboard),forbidden);
   assert.equal(dashboard.submission.id,'pending-verification');
   assert.equal((await request('/api/public/photos/food-seller-pending','')).status,404);
-  assert.equal((await request('/api/buyer/interest',buyer.cookie,{foodId:'food-seller-pending',interested:true})).status,404);
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{sellerId:'seller-pending'})).status,404);
 });
 
 test('seller ownership is enforced for edits and photo retrieval', async () => {
@@ -278,8 +308,10 @@ test('private bucket documents cannot be retrieved through public or seller rout
 test('portrait consent is independent; withdrawal blocks access immediately and queues only the public copy',async()=>{
   const a=await applicant('portraityes');const id=await submit(a,fieldsFor({portrait:true}));await decision(id);
   assert.equal((await request(`/api/public/sellers/${a.seller}/portrait`)).status,200);
+  assert.equal((await (await request(`/api/public/sellers/${a.seller}`)).json()).seller.portrait,`/api/public/sellers/${a.seller}/portrait`);
   assert.equal((await request('/api/seller/portrait/withdraw',a.cookie,{})).status,200);
   assert.equal((await request(`/api/public/sellers/${a.seller}/portrait`)).status,404);
+  assert.equal((await (await request(`/api/public/sellers/${a.seller}`)).json()).seller.portrait,null);
   assert.equal((await request(`/api/public/sellers/${a.seller}/place`)).status,200);
   await cleanup(new Date().toISOString());
   const files=(await db.prepare('SELECT kind,state,object_key FROM verification_files WHERE submission_id=?').bind(id).all()).results;
@@ -316,13 +348,16 @@ test('rejection deadline remains tied to old submission after resubmission; dele
 
 test('account deletion revokes access and erases structured data; failed object deletions remain retryable',async()=>{
   const a=await applicant('accountcleanup');const id=await submit(a,fieldsFor({portrait:true}));await decision(id);
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{sellerId:a.seller})).status,200);
+  assert.equal((await request('/api/buyer/review',buyer.cookie,{sellerId:a.seller,rating:5,body:'Test'})).status,200);
   const files=(await db.prepare('SELECT object_key,bucket FROM verification_files WHERE subject=?').bind(a.seller).all()).results;
   const r=await mf.dispatchFetch(origin+'/test/delete-account',{method:'POST',body:JSON.stringify({userId:a.id,fail:true})});const result=await r.json();
   assert.equal(result.dataDeleted,true);assert.equal(result.filesPending,3);
   assert.equal((await request('/api/seller/dashboard',a.cookie)).status,403);
   assert.equal((await request(`/api/public/sellers/${a.seller}/portrait`)).status,404);
+  assert.equal((await request(`/api/public/sellers/${a.seller}`)).status,404);
   assert.equal((await request(`/api/admin/verifications/${id}/documents/identity`,admin.cookie)).status,404);
-  for(const [table,column,value] of [['seller_verifications','seller_id',a.seller],['auth_users','id',a.id],['auth_accounts','user_id',a.id],['auth_sessions','user_id',a.id]])assert.equal((await db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE ${column}=?`).bind(value).first()).n,0);
+  for(const [table,column,value] of [['seller_interests','seller_id',a.seller],['seller_reviews','seller_id',a.seller],['seller_verifications','seller_id',a.seller],['auth_users','id',a.id],['auth_accounts','user_id',a.id],['auth_sessions','user_id',a.id]])assert.equal((await db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE ${column}=?`).bind(value).first()).n,0);
   await cleanup(new Date(Date.now()+120000).toISOString());
   for(const f of files)assert.equal(await (f.bucket==='private'?privateBucket:bucket).get(f.object_key),null);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM verification_files WHERE subject=?').bind(a.seller).first()).n,0);
@@ -337,4 +372,247 @@ test('concurrent submission/decision races leave one decision and retryable orph
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM audit_log WHERE subject=? AND action IN ('verified','rejected')").bind(a.seller).first()).n,1);
   await cleanup(new Date(Date.now()+2*3600000).toISOString());
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM verification_files WHERE subject=? AND state='staging'").bind(a.seller).first()).n,0);
+});
+
+
+test('all admin APIs deny admins without session MFA, including Google-origin sessions',async()=>{
+  const a=await newAdmin('mfarequired');
+  // Model the account returned after a verified Google callback. The authorization
+  // gate is provider-independent and must not trust the provider as local MFA.
+  await db.prepare("UPDATE auth_accounts SET provider_id='google',password=NULL WHERE user_id=?").bind(a.id).run();
+  for(const path of ['/api/admin/verifications','/api/admin/audit','/api/admin/verifications/guessed/documents/identity'])assert.equal((await request(path,a.cookie)).status,403);
+  assert.equal((await request('/api/admin/decision',a.cookie,{id:'guessed',status:'verified',note:'Checked',eligibility:'adult'})).status,403);
+  await enroll(a);
+  assert.equal((await request('/api/admin/audit',a.cookie)).status,200);
+  for(const c of ['',buyer.cookie,sellerB.cookie])for(const endpoint of ['status','enroll','confirm','verify','recover'])assert.equal((await request('/api/admin/mfa/'+endpoint,c,endpoint==='status'?undefined:{})).status,403);
+});
+
+test('MFA proof belongs to one session, expires, and cannot be forged in headers',async()=>{
+  const a=await enroll(await newAdmin('sessionmfa'));const second=await loginAgain('sessionmfa');
+  assert.equal((await request('/api/admin/audit',second,undefined,{'x-mfa-verified':'true'})).status,403);
+  assert.equal((await request('/api/admin/mfa/verify',second,{code:a.enrollmentCode})).status,403,'enrollment code is not reusable');
+  assert.equal((await request('/api/admin/mfa/recover',second,{code:a.recoveryCodes[0]})).status,200);
+  assert.equal((await request('/api/admin/audit',second)).status,200);
+  await db.prepare('UPDATE admin_mfa_sessions SET expires_at=0 WHERE user_id=?').bind(a.id).run();
+  assert.equal((await request('/api/admin/audit',a.cookie)).status,403);
+  assert.equal((await request('/api/admin/audit',second)).status,403);
+});
+
+test('recovery codes are hashed, single-use under concurrency, and scoped to the account',async()=>{
+  const a=await enroll(await newAdmin('recovermfa')),second=await loginAgain('recovermfa');
+  const stored=await db.prepare('SELECT digest FROM admin_recovery_codes WHERE user_id=?').bind(a.id).all();assert.equal(stored.results.length,10);
+  for(const code of a.recoveryCodes)assert.doesNotMatch(JSON.stringify(stored),new RegExp(code));
+  const attempts=await Promise.all([request('/api/admin/mfa/recover',second,{code:a.recoveryCodes[0]}),request('/api/admin/mfa/recover',second,{code:a.recoveryCodes[0]})]);assert.deepEqual(attempts.map(r=>r.status).sort(),[200,403]);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_recovery_codes WHERE user_id=?').bind(a.id).first()).n,9);
+  const b=await enroll(await newAdmin('othermfafactor'));assert.equal((await request('/api/admin/mfa/recover',b.cookie,{code:a.recoveryCodes[1]})).status,403);
+  const secret=await db.prepare('SELECT secret FROM admin_mfa WHERE user_id=?').bind(a.id).first();assert.doesNotMatch(secret.secret,new RegExp(a.secret));
+  const audit=await db.prepare('SELECT * FROM audit_log WHERE subject=?').bind(a.id).all();assert.doesNotMatch(JSON.stringify(audit),new RegExp(a.secret+'|'+a.recoveryCodes.join('|')));
+});
+
+test('enrollment requires a fresh session, is session-bound, expires and cannot replace an enabled factor',async()=>{
+  const a=await newAdmin('setupmfa');
+  await db.prepare('UPDATE auth_sessions SET created_at=? WHERE user_id=?').bind(Date.now()-700000,a.id).run();
+  assert.equal((await request('/api/admin/mfa/enroll',a.cookie,{})).status,403);
+  a.cookie=await loginAgain('setupmfa');
+  const setup=await (await request('/api/admin/mfa/enroll',a.cookie,{})).json();const other=await loginAgain('setupmfa');
+  assert.equal((await request('/api/admin/mfa/confirm',other,{code:otp(setup.secret)})).status,403);
+  await db.prepare('UPDATE admin_mfa SET setup_expires=0 WHERE user_id=?').bind(a.id).run();
+  assert.equal((await request('/api/admin/mfa/confirm',a.cookie,{code:otp(setup.secret)})).status,403);
+  const b=await enroll(await newAdmin('lockedfactor'));
+  assert.equal((await request('/api/admin/mfa/enroll',b.cookie,{})).status,409);
+  assert.equal((await request('/api/admin/mfa/disable',b.cookie,{})).status,404);
+});
+
+test('MFA retries use persistent account limits and enforce CSRF',async()=>{
+  const a=await newAdmin('ratemfa');
+  assert.equal((await request('/api/admin/mfa/enroll',a.cookie,{}, {Origin:'https://attacker.test'})).status,403);
+  for(let i=0;i<5;i++)assert.equal((await request('/api/admin/mfa/verify',a.cookie,{code:'000000'})).status,403);
+  assert.equal((await request('/api/admin/mfa/enroll',a.cookie,{})).status,429);
+});
+
+test('audit pagination is bounded, stable across identical timestamps, and excludes private fields',async()=>{
+  const all=[];let cursor=null;
+  do{const response=await request('/api/admin/audit?limit=3'+(cursor?'&cursor='+encodeURIComponent(cursor):''),admin.cookie);assert.equal(response.status,200);const data=await response.json();assert.ok(data.events.length<=3);all.push(...data.events);cursor=data.nextCursor;}while(cursor);
+  assert.equal(new Set(all.map(e=>e.id)).size,all.length);assert.equal(all.length,(await db.prepare('SELECT COUNT(*) n FROM audit_log').first()).n);
+  assert.doesNotMatch(JSON.stringify(all),/nid_number|nid_ciphertext|personal_email|personal_phone|object_key|Never public|sensitive@example/);
+  for(const q of ['limit=101','limit=-1','cursor=invalid','unknown=yes'])assert.equal((await request('/api/admin/audit?'+q,admin.cookie)).status,400);
+});
+
+test('changing business identity/location or place photo requires renewed approval and location consent',async()=>{
+  const a=await applicant('renewreview');let id=await submit(a,fieldsFor({portrait:true}));await decision(id);
+  assert.equal((await request(`/api/public/sellers/${a.seller}/place`)).status,200);
+  assert.equal((await request('/api/seller/verification/reopen',a.cookie,{})).status,200);
+  assert.equal((await request(`/api/public/sellers/${a.seller}/place`)).status,404);
+  assert.equal((await request(`/api/public/sellers/${a.seller}/portrait`)).status,404);
+  assert.equal((await request(`/api/public/sellers/${a.seller}`)).status,404);
+  assert.equal((await request('/api/seller/verification',a.cookie,fieldsFor({consent:false}))).status,400);
+  id=await submit(a);await decision(id);
+  assert.equal((await request(`/api/public/sellers/${a.seller}/place`)).status,200);
+  assert.equal((await request('/api/seller/profile',a.cookie,{name:'New business',bio:'Food',address:'New pickup',lat:22,lng:89,hours:'Noon'})).status,200);
+  assert.equal((await request(`/api/public/sellers/${a.seller}/place`)).status,404);
+});
+
+test('admin rejection requires a reason; simultaneous approvals publish only one set of copies',async()=>{
+  const a=await applicant('approvalrace');const id=await submit(a,fieldsFor({portrait:true}));
+  assert.equal((await request('/api/admin/decision',admin.cookie,{id,status:'rejected',note:'  ',eligibility:'adult'})).status,400);
+  const attempts=await Promise.all([request('/api/admin/decision',admin.cookie,{id,status:'verified',note:'Checked',eligibility:'adult'}),request('/api/admin/decision',admin.cookie,{id,status:'verified',note:'Checked',eligibility:'adult'})]);assert.deepEqual(attempts.map(r=>r.status).sort(),[200,409]);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM verification_files WHERE submission_id=? AND bucket='media' AND state='attached'").bind(id).first()).n,2);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM audit_log WHERE subject=? AND action='verified'").bind(a.seller).first()).n,1);
+});
+
+
+test('logout and account deletion erase MFA session proofs and factor material',async()=>{
+  const a=await enroll(await newAdmin('mfaremoval'));
+  assert.equal((await request('/api/auth/sign-out',a.cookie,{})).status,200);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_mfa_sessions WHERE user_id=?').bind(a.id).first()).n,0);
+  assert.equal((await request('/api/admin/audit',a.cookie)).status,403);
+  const response=await mf.dispatchFetch(origin+'/test/delete-account',{method:'POST',body:JSON.stringify({userId:a.id})});assert.equal(response.status,200);
+  for(const table of ['admin_mfa','admin_recovery_codes','admin_mfa_sessions'])assert.equal((await db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE user_id=?`).bind(a.id).first()).n,0);
+});
+
+
+test('TOTP verification rejects expired codes and atomically consumes a valid code',async()=>{
+  const a=await enroll(await newAdmin('totprace')),second=await loginAgain('totprace');
+  assert.equal((await request('/api/admin/mfa/verify',second,{code:otp(a.secret,Math.floor(Date.now()/30000)-3)})).status,403);
+  const code=otp(a.secret,Math.floor(Date.now()/30000)+1);
+  const results=await Promise.all([request('/api/admin/mfa/verify',second,{code}),request('/api/admin/mfa/verify',second,{code})]);assert.deepEqual(results.map(r=>r.status).sort(),[200,403]);
+  assert.equal((await request('/api/admin/audit',second)).status,200);
+});
+
+
+test('seller engagement is unique under concurrent requests and review editing is explicit and scoped',async()=>{
+  const results=await Promise.all(Array.from({length:8},()=>request('/api/buyer/interest',buyer.cookie,{sellerId:'seller-b'})));
+  assert.ok(results.every(r=>r.status===200));
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM seller_interests WHERE seller_id='seller-b' AND user_id=?").bind(buyer.id).first()).n,1);
+  const reviews=await Promise.all(Array.from({length:8},()=>request('/api/buyer/review',buyer.cookie,{sellerId:'seller-b',rating:4,body:'Fresh food'})));
+  assert.equal(reviews.filter(r=>r.status===200).length,1);assert.equal(reviews.filter(r=>r.status===409).length,7);
+  const second=await account('engagement-second');
+  assert.equal((await request('/api/buyer/review/edit',second.cookie,{sellerId:'seller-b',rating:1,body:'Not mine'})).status,404);
+  assert.equal((await request('/api/buyer/review/edit',buyer.cookie,{sellerId:'seller-b',rating:3,body:'Updated review'})).status,200);
+  const own=await (await request('/api/buyer/reviews/seller-b',buyer.cookie)).json();assert.equal(own.review.rating,3);assert.equal(own.review.body,'Updated review');
+  const detail=await (await request('/api/public/sellers/seller-b')).json();assert.equal(detail.seller.rating,3);assert.equal(detail.seller.review_count,1);assert.equal(detail.seller.interest_count,1);
+  assert.equal((await (await request('/api/seller/dashboard',sellerB.cookie)).json()).interestCount,1);
+  assert.equal((await request('/api/buyer/review',second.cookie,{sellerId:'seller-b',rating:0,body:'bad'})).status,400);
+  assert.equal((await request('/api/buyer/review',second.cookie,{sellerId:'seller-b',rating:1.5,body:'bad'})).status,400);
+  assert.equal((await request('/api/buyer/interest',second.cookie,{sellerId:'seller-b',userId:buyer.id})).status,400);
+  assert.equal((await request('/api/buyer/review/edit',buyer.cookie,{sellerId:'seller-b',rating:3,body:'CSRF'},{Origin:'https://evil.test'})).status,403);
+  await request('/api/buyer/interest',second.cookie,{sellerId:'seller-b'});
+  await request('/api/buyer/review',second.cookie,{sellerId:'seller-b',rating:5,body:'Mine'});
+  await mf.dispatchFetch(origin+'/test/delete-account',{method:'POST',body:JSON.stringify({userId:second.id})});
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM seller_interests WHERE user_id=?').bind(second.id).first()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM seller_reviews WHERE user_id=?').bind(second.id).first()).n,0);
+});
+
+test('near-me exact distance filtering precedes pagination, handles antimeridian/poles and excludes unapproved sellers',async()=>{
+  const points=[['geo-near',0,0.01,'verified'],['geo-far',0,0.03,'verified'],['geo-corner',0.04,0.04,'verified'],['geo-west',0,-179.99,'verified'],['geo-east',0,179.98,'verified'],['geo-pole',89.99,150,'verified'],['geo-south',-89.99,-150,'verified'],['geo-pending',0,0,'pending'],['geo-rejected',0,0,'rejected'],['geo-suspended',0,0,'suspended']];
+  try {
+    for(const [id,lat,lng,status] of points)await db.prepare('INSERT INTO sellers VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(id,id,id,'private-phone','Food','Public pickup',lat,lng,'Noon',status,'2026-01-01').run();
+    const search=async(q)=>{const r=await request('/api/public/sellers?'+q);assert.equal(r.status,200,await r.clone().text());return r.json();};
+    const first=await search('lat=0&lng=0&limit=1');assert.equal(first.total,2);assert.equal(first.radius,5);assert.equal(first.sellers[0].id,'geo-near');assert.ok(first.sellers[0].distance_km>1&&first.sellers[0].distance_km<1.2);
+    assert.equal((await search('lat=0&lng=0&limit=1&page=2')).sellers[0].id,'geo-far');
+    assert.equal((await search('lat=0&lng=0&radius=100')).total,3);
+    assert.deepEqual((await search('lat=0&lng=180')).sellers.map(s=>s.id),['geo-west','geo-east']);
+    assert.deepEqual((await search('lat=0&lng=-180')).sellers.map(s=>s.id),['geo-west','geo-east']);
+    assert.equal((await search('lat=90&lng=0')).sellers[0].id,'geo-pole');
+    assert.equal((await search('lat=-90&lng=0')).sellers[0].id,'geo-south');
+    assert.equal((await search('lat=0&lng=0&radius=0.1')).total,0);
+    const listing=await search('limit=100');assert.ok(listing.sellers.every(s=>s.status==='verified'));
+    for(const id of ['geo-pending','geo-rejected','geo-suspended'])assert.equal((await request('/api/public/sellers/'+id)).status,404);
+    assert.doesNotMatch(JSON.stringify(listing),/private-phone|nid|personal_email|home_address|object_key|passport|owner/);
+    for(const q of ['lat=0','lng=0','lat=91&lng=0','lat=0&lng=181','radius=101','radius=0','lat=&lng=0','lat=NaN&lng=0','page=1.5','limit=101','lat=0&lat=1&lng=0','extra=true'])assert.equal((await request('/api/public/sellers?'+q)).status,400,q);
+    assert.equal((await request('/api/public/sellers/geo-near?page=0')).status,400);
+  }finally{for(const [id] of points)await db.prepare('DELETE FROM sellers WHERE id=?').bind(id).run();}
+});
+
+
+async function deletionCode(a){
+  const r=await request('/api/account/deletion-code',a.cookie,{});assert.equal(r.status,200,await r.clone().text());
+  const messages=await (await mf.dispatchFetch(origin+'/test/mail')).json();
+  const code=messages.at(-1).text.split('\n')[1];assert.match(code,/^[a-f0-9]{32}$/);return code;
+}
+test('deletion requires expiring single-use email reauthentication bound to the user and session',async()=>{
+  const a=await account('deleteconfirmed'),b=await account('deleteother');const code=await deletionCode(a);
+  const stored=await db.prepare('SELECT digest FROM deletion_challenges WHERE user_id=?').bind(a.id).first();assert.notEqual(stored.digest,code);
+  assert.equal((await request('/api/account/delete',b.cookie,{code,confirmation:'DELETE'})).status,403);
+  const secondCookie=await loginAgain('deleteconfirmed');assert.equal((await request('/api/account/delete',secondCookie,{code,confirmation:'DELETE'})).status,403);
+  assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'},{Origin:'https://evil.test'})).status,403);
+  assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'no'})).status,400);
+  const race=await Promise.all([request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'}),request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'})]);
+  assert.equal(race.filter(r=>r.status===200).length,1);assert.ok(race.some(r=>[401,403].includes(r.status)));
+  const success=race.find(r=>r.status===200);assert.equal((await success.json()).filesPending,0);assert.match(success.headers.get('set-cookie'),/Max-Age=0/);
+  assert.equal((await request('/api/account/me',secondCookie)).status,401);assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'})).status,401);
+  for(const table of ['auth_users','auth_accounts','auth_sessions','deletion_challenges']){const column=table==='auth_users'?'id':'user_id';assert.equal((await db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE ${column}=?`).bind(a.id).first()).n,0);}
+  const events=await db.prepare("SELECT subject,action FROM audit_log WHERE subject=?").bind(a.id).all();assert.deepEqual(events.results,[{subject:a.id,action:'account_deleted'}]);
+});
+test('expired deletion codes and excessive guesses fail; OAuth accounts use the same email proof and admins also require MFA',async()=>{
+  const a=await account('deleteexpiry');const code=await deletionCode(a);await db.prepare('UPDATE deletion_challenges SET expires_at=0 WHERE user_id=?').bind(a.id).run();
+  assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'})).status,403);
+  for(let i=0;i<4;i++)assert.equal((await request('/api/account/delete',a.cookie,{code:'0'.repeat(32),confirmation:'DELETE'})).status,403);
+  assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'})).status,429);
+  const google=await account('deletegoogle');await db.prepare("UPDATE auth_accounts SET provider_id='google',password=NULL WHERE user_id=?").bind(google.id).run();const oauthCode=await deletionCode(google);
+  assert.equal((await request('/api/account/delete',google.cookie,{code:oauthCode,confirmation:'DELETE'})).status,200);
+  const adminDelete=await newAdmin('deletemfa');assert.equal((await request('/api/account/deletion-code',adminDelete.cookie,{})).status,403);await enroll(adminDelete);const adminCode=await deletionCode(adminDelete);
+  assert.equal((await request('/api/account/delete',adminDelete.cookie,{code:adminCode,confirmation:'DELETE'})).status,200);
+});
+test('public account deletion truthfully returns pending jobs and retries erase every private/public derivative',async()=>{
+  const a=await applicant('deletepending');const id=await submit(a,fieldsFor({portrait:true}));await decision(id);
+  assert.equal((await request('/api/buyer/report',buyer.cookie,{sellerId:a.seller,reason:'A test report containing private text'})).status,200);
+  const files=(await db.prepare('SELECT object_key,bucket FROM verification_files WHERE subject=?').bind(a.seller).all()).results;
+  const code=await deletionCode(a);const r=await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'},{'x-test-fail-storage':'1'});assert.equal(r.status,202);const result=await r.json();assert.equal(result.dataDeleted,true);assert.equal(result.filesPending,3);
+  assert.equal((await request(`/api/public/sellers/${a.seller}`)).status,404);assert.equal((await request(`/api/admin/verifications/${id}/documents/passport`,admin.cookie)).status,404);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM seller_reports WHERE seller_id=?').bind(a.seller).first()).n,0);
+  await cleanup(new Date(Date.now()+120000).toISOString());for(const f of files)assert.equal(await (f.bucket==='private'?privateBucket:bucket).get(f.object_key),null);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM verification_files WHERE subject=?').bind(a.seller).first()).n,0);
+});
+test('buyer reports, atomic admin decisions, suspension bypass resistance and renewed review',async()=>{
+  const reporter=await account('reportbuyer');const a=await applicant('reported');const id=await submit(a,fieldsFor({portrait:true}));await decision(id);
+  for(const cookie of ['',a.cookie,admin.cookie])assert.equal((await request('/api/buyer/report',cookie,{sellerId:a.seller,reason:'A detailed buyer report'})).status,403);
+  assert.equal((await request('/api/buyer/report',reporter.cookie,{sellerId:a.seller,reason:'A detailed buyer report'})).status,200);
+  assert.equal((await request('/api/buyer/report',reporter.cookie,{sellerId:a.seller,reason:'Duplicate report'})).status,409);
+  const report=await db.prepare('SELECT id FROM seller_reports WHERE seller_id=?').bind(a.seller).first();
+  const queue=await request('/api/admin/reports',admin.cookie);assert.equal(queue.status,200);assert.ok((await queue.json()).reports.some(r=>r.id===report.id));
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM audit_log WHERE subject=? AND action='report_viewed' AND admin_ref=?").bind(report.id,admin.id).first()).n,1);
+  for(const cookie of ['',reporter.cookie,a.cookie])assert.equal((await request('/api/admin/reports',cookie)).status,403);
+  const noMfa=await newAdmin('moderatemfa');assert.equal((await request('/api/admin/reports',noMfa.cookie)).status,403);
+  const race=await Promise.all([1,2].map(()=>request('/api/admin/reports/decision',admin.cookie,{id:report.id,action:'suspend',reason:'Business activity needs investigation'})));
+  assert.deepEqual(race.map(r=>r.status).sort(),[200,409]);
+  const hidden=async()=>{for(const suffix of ['', '/place','/portrait'])assert.equal((await request(`/api/public/sellers/${a.seller}${suffix}`)).status,404);assert.ok(!(await (await request('/api/public/sellers?limit=100')).json()).sellers.some(s=>s.id===a.seller));};await hidden();
+  const dashboard=await (await request('/api/seller/dashboard',a.cookie)).json();assert.equal(dashboard.suspension.reason,'Business activity needs investigation');
+  assert.equal((await request('/api/seller/profile',a.cookie,{name:'Changed',bio:'Food',address:'Pickup',lat:23,lng:90,hours:'Noon'})).status,403);
+  // Even a stale or racing approval cannot bypass the independent suspension.
+  await db.prepare("UPDATE sellers SET status='verified' WHERE id=?").bind(a.seller).run();await hidden();
+  assert.equal((await request('/api/buyer/interest',reporter.cookie,{sellerId:a.seller})).status,404);
+  await submission('suspended-review',a.seller);await decision('suspended-review');assert.equal((await db.prepare('SELECT status FROM sellers WHERE id=?').bind(a.seller).first()).status,'suspended');await hidden();
+  assert.equal((await request('/api/admin/suspensions/lift',admin.cookie,{sellerId:a.seller,reason:'Investigation finished; review again'})).status,200);assert.equal((await db.prepare('SELECT status FROM sellers WHERE id=?').bind(a.seller).first()).status,'pending');await hidden();
+  const again=await submit(a);await decision(again);assert.equal((await request(`/api/public/sellers/${a.seller}`)).status,200);
+  assert.equal((await request('/api/buyer/report',reporter.cookie,{sellerId:a.seller,reason:'A different detailed report'})).status,200);
+  const latest=await db.prepare("SELECT id FROM seller_reports WHERE seller_id=? AND status='open'").bind(a.seller).first();
+  assert.equal((await request('/api/admin/reports/decision',admin.cookie,{id:latest.id,action:'dismiss',reason:'No evidence of a policy violation'})).status,200);assert.equal((await request(`/api/public/sellers/${a.seller}`)).status,200);
+  const events=(await db.prepare('SELECT action FROM audit_log WHERE subject=?').bind(a.seller).all()).results.map(x=>x.action);assert.ok(events.includes('seller_suspended'));assert.ok(events.includes('suspension_lifted'));assert.ok(events.includes('report_dismissed'));
+  assert.equal((await request('/api/buyer/report',reporter.cookie,{sellerId:a.seller,reason:'Too many reports today'})).status,429);
+});
+test('persistent API limits are atomic and bounded input, HTTPS and CSRF fail closed',async()=>{
+  const ip='203.0.113.99',key=createHmac('sha256','test-only-secret-with-more-than-thirty-two-characters').update(`api:ip:${ip}`).digest('hex');
+  await db.prepare('INSERT INTO auth_limits(key,count,expires_at) VALUES(?,299,?)').bind(key,Date.now()+60000).run();
+  const race=await Promise.all([1,2].map(()=>request('/api/public/sellers','',undefined,{'CF-Connecting-IP':ip})));assert.deepEqual(race.map(r=>r.status).sort(),[200,429]);assert.ok(Number(race.find(r=>r.status===429).headers.get('retry-after'))>0);
+  assert.equal((await request('/api/public/sellers','',undefined,{'CF-Connecting-IP':ip})).status,429);
+  const a=await account('boundedbuyer');
+  assert.equal((await request('/api/buyer/review',a.cookie,{sellerId:'seller-b',rating:5,body:'x'.repeat(17000)})).status,413);
+  assert.equal((await request('/api/buyer/review',a.cookie,{sellerId:'seller-b',rating:5,body:'okay'},{'Content-Type':'text/plain'})).status,415);
+  assert.equal((await request('/api/buyer/review',a.cookie,[])).status,400);
+  assert.equal((await request('/api/buyer/review',a.cookie,{sellerId:'seller-b',rating:5,body:'okay'},{'sec-fetch-site':'cross-site'})).status,403);
+  assert.equal((await mf.dispatchFetch('http://foodlane.test/api/public/sellers')).status,403);
+  assert.equal((await request('/api/public/catalogue?unexpected=1')).status,400);
+  assert.equal((await request('/api/admin/reports?page=0',admin.cookie)).status,400);
+  assert.equal((await request('/api/public/sellers/'+'x'.repeat(101))).status,400);
+  const up=await applicant('uploadlimited');await db.prepare('INSERT INTO auth_limits(key,count,expires_at) VALUES(?,10,?)').bind('upload:'+up.id,Date.now()+600000).run();
+  const limited=await request('/api/seller/verification',up.cookie,fieldsFor());assert.equal(limited.status,429);assert.equal(limited.headers.get('retry-after'),'600');
+});
+
+
+test('account deletion racing a cleanup batch leaves no stale file-job record after deletion succeeds',async()=>{
+  const id='cleanup-account-race',key='nid/test-cleanup-race/document.png';await privateBucket.put(key,fixture);
+  await db.prepare("INSERT INTO verification_files(id,subject,kind,bucket,object_key,state,created_at,delete_after) VALUES(?,'opaque-subject','nid','private',?,'attached','2019-01-01','2019-01-02')").bind(id,key).run();
+  const r=await mf.dispatchFetch(origin+'/test/cleanup',{method:'POST',body:JSON.stringify({now:'2020-01-01T00:00:00.000Z',accountDeleteRace:true})});assert.equal(r.status,200);assert.equal((await r.json()).deleted,1);
+  assert.equal(await privateBucket.get(key),null);assert.equal(await db.prepare('SELECT id FROM verification_files WHERE id=?').bind(id).first(),null);
 });

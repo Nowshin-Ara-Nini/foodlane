@@ -39,3 +39,12 @@ The application no longer uses Sites authentication or mock identity headers. `.
 
 
 Step 3 private-data setup, retention operations and deployment checks: [PRIVATE_DATA_RUNBOOK.md](PRIVATE_DATA_RUNBOOK.md). Run `npm run test:privacy` for privacy tests and, after building, `npm run verification:cleanup:local` to dispatch local cleanup. Migration 0006 replaces legacy plaintext test verification and disables legacy unsanitized food photos; do not use it as a migration for real historical identity data.
+
+
+Admin setup and step 4 checks: [ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md). Visit `/admin` after operator provisioning; enrollment or session verification happens at `/admin/mfa`. Run `npm run test:admin`, and run `npm run test:admin:built` after building to check the built admin journey.
+
+
+Step 5 maps, public seller pages, near-me search and seller engagement are implemented locally. Migration history now runs through `0008_seller_engagement.sql`; see [DISCOVERY_RUNBOOK.md](DISCOVERY_RUNBOOK.md) for API contracts, migration transfer rules and remaining browser checks. Step 6 and public activation await approval.
+
+
+Step 6 is implemented locally: reports/moderation, email-confirmed account deletion, API limits, security headers, and `/privacy`. Migration history now runs through `0009_abuse_deletion.sql`. Full-project lint issues from earlier checkpoints are resolved. See [SECURITY_RUNBOOK.md](SECURITY_RUNBOOK.md) for the final acceptance record and deployment gates. Do not activate a public route until those gates and the final owner checkpoint are approved.

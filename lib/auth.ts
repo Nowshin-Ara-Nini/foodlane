@@ -16,10 +16,7 @@ export interface AuthEnvironment {
 }
 
 export type AuthMail = { to: string; subject: string; text: string };
-export function createAuth(env: AuthEnvironment, sendMail?: (mail: AuthMail) => Promise<void>) {
-  const baseURL = authOrigin(env.AUTH_BASE_URL, env.AUTH_ALLOW_LOCAL_HTTP === 'true');
-  if (!env.BETTER_AUTH_SECRET || env.BETTER_AUTH_SECRET.length < 32) throw new Error('Auth secret is missing or too short.');
-  const deliver = sendMail ?? (async (mail: AuthMail) => {
+export async function deliverAuthMail(env:AuthEnvironment,mail:AuthMail) {
     if (!env.RESEND_API_KEY || !env.AUTH_EMAIL_FROM) throw new Error('Email service is not configured.');
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -27,7 +24,11 @@ export function createAuth(env: AuthEnvironment, sendMail?: (mail: AuthMail) => 
       body: JSON.stringify({ from: env.AUTH_EMAIL_FROM, to: [mail.to], subject: mail.subject, text: mail.text }),
     });
     if (!response.ok) throw new Error('Email delivery failed.');
-  });
+}
+export function createAuth(env: AuthEnvironment, sendMail?: (mail: AuthMail) => Promise<void>) {
+  const baseURL = authOrigin(env.AUTH_BASE_URL, env.AUTH_ALLOW_LOCAL_HTTP === 'true');
+  if (!env.BETTER_AUTH_SECRET || env.BETTER_AUTH_SECRET.length < 32) throw new Error('Auth secret is missing or too short.');
+  const deliver = sendMail ?? ((mail:AuthMail) => deliverAuthMail(env,mail));
   return betterAuth({
     appName: 'Foodlane',
     baseURL,

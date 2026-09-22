@@ -7,6 +7,8 @@
   // Deliberately not publicly routable during the six implementation checkpoints.
   "workers_dev": false,
   "preview_urls": false,
+  // Avoid automatic URL/header traces containing authentication links or private route references.
+  "observability": { "enabled": false },
   "d1_databases": [{
     "binding": "DB",
     "database_name": "foodlane",

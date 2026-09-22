@@ -1,4 +1,3 @@
-import Foodlane from '../foodlane';
-import {requirePageRole} from '../auth-session';
+import {redirect} from 'next/navigation';
 export const dynamic='force-dynamic';
-export default async function Review(){await requirePageRole('admin','/review');return <Foodlane mode="review"/>}
+export default function Review(){redirect('/admin')}

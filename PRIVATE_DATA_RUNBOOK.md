@@ -85,3 +85,13 @@ Account deletion overrides normal retention, including when retention is disable
 - Real R2 URL denial, remote bucket configuration, deployed Images/CPU behavior and live cron delivery remain deployment checks. MFA denial tests and the full admin panel are step 4, not completed here. Public account deletion UI is step 6.
 
 Stop here and wait for explicit approval before step 4.
+
+
+## Step 4 update
+
+Admin MFA and the review/audit panel are now implemented; the step 3 limitations above are historical. See [ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md) for the current authorization checks, 0007 migration and validation results. Remote deployment checks and the step 6 account-deletion UI remain outstanding.
+
+
+## Final-step update
+
+Step 6 is now implemented locally, including report moderation, reauthenticated account deletion, API limits and privacy policy. Earlier checkpoint statements about pending step 6 work or full-project lint failures are historical. See [SECURITY_RUNBOOK.md](SECURITY_RUNBOOK.md) for current results and deployment blockers.

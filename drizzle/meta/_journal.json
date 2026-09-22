@@ -50,6 +50,27 @@
       "when": 1789990738941,
       "tag": "0006_private_verification",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1789992564799,
+      "tag": "0007_admin_mfa",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790069332853,
+      "tag": "0008_seller_engagement",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1790076062676,
+      "tag": "0009_abuse_deletion",
+      "breakpoints": true
     }
   ]
 }

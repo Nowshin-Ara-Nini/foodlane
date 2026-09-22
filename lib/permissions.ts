@@ -1,7 +1,7 @@
 import { createAuth, type AuthEnvironment } from './auth';
 
 export type Role = 'buyer' | 'seller' | 'admin';
-export type AppUser = { userId: string; name: string; role: Role; roleChosen: boolean };
+export type AppUser = { userId: string; name: string; role: Role; roleChosen: boolean; sessionId:string; sessionCreatedAt:number };
 export class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
@@ -13,7 +13,7 @@ export async function sessionUser(headers: Headers, env: AuthEnvironment): Promi
   const user = await env.DB.prepare('SELECT id, name, role, role_chosen FROM auth_users WHERE id = ? AND email_verified = 1')
     .bind(session.user.id).first<{ id: string; name: string; role: string; role_chosen: number }>();
   if (!user || !['buyer', 'seller', 'admin'].includes(user.role)) return null;
-  return { userId: user.id, name: user.name, role: user.role as Role, roleChosen: !!user.role_chosen };
+  return { sessionId:session.session.id, sessionCreatedAt:new Date(session.session.createdAt).getTime(), userId: user.id, name: user.name, role: user.role as Role, roleChosen: !!user.role_chosen };
 }
 export function requireRole(user: AppUser | null, role: Role): AppUser {
   if (!user || !user.roleChosen || user.role !== role) throw new HttpError(403, `${role} access required.`);

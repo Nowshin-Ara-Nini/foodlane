@@ -1,7 +1,12 @@
 import { sqliteTable, text, integer, real, primaryKey, index } from 'drizzle-orm/sqlite-core';
 export * from './auth-schema';
-export const sellers=sqliteTable('sellers',{id:text('id').primaryKey(),owner:text('owner').notNull().unique(),name:text('name').notNull(),phone:text('phone').notNull(),bio:text('bio').notNull(),address:text('address').notNull(),lat:real('lat').notNull(),lng:real('lng').notNull(),hours:text('hours').notNull(),status:text('status').notNull().default('pending'),updated:text('updated').notNull()});
+export const sellers=sqliteTable('sellers',{id:text('id').primaryKey(),owner:text('owner').notNull().unique(),name:text('name').notNull(),phone:text('phone').notNull(),bio:text('bio').notNull(),address:text('address').notNull(),lat:real('lat').notNull(),lng:real('lng').notNull(),hours:text('hours').notNull(),status:text('status').notNull().default('pending'),updated:text('updated').notNull()},t=>[index('sellers_discovery').on(t.status,t.lat,t.lng)]);
 export const foods=sqliteTable('foods',{id:text('id').primaryKey(),sellerId:text('seller_id').notNull().references(()=>sellers.id),name:text('name').notNull(),description:text('description').notNull(),price:real('price').notNull(),category:text('category').notNull(),image:text('image').notNull(),available:integer('available').notNull().default(1)},t=>[index('idx_foods_seller').on(t.sellerId)]);
 export const interests=sqliteTable('interests',{foodId:text('food_id').notNull().references(()=>foods.id),userId:text('user_id').notNull()},t=>[primaryKey({columns:[t.foodId,t.userId]})]);
 export const reviews=sqliteTable('reviews',{foodId:text('food_id').notNull().references(()=>foods.id),userId:text('user_id').notNull(),name:text('name').notNull(),rating:integer('rating').notNull(),body:text('body').notNull(),created:text('created').notNull()},t=>[primaryKey({columns:[t.foodId,t.userId]})]);
 export * from './private-schema';
+export * from './admin-schema';
+
+export * from './engagement-schema';
+
+export * from './safety-schema';

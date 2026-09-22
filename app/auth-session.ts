@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { type AuthEnvironment } from '../lib/auth';
 import { safeReturnPath } from '../lib/auth-policy';
 import { sessionUser, type Role } from '../lib/permissions';
+import { adminMfaVerified } from '../lib/admin-mfa';
 
 export function authEnvironment(): AuthEnvironment {
   if (!env.DB || !env.AUTH_BASE_URL || !env.BETTER_AUTH_SECRET) throw new Error('Authentication is not configured.');
@@ -20,6 +21,7 @@ export async function requirePageRole(role: Role, returnTo: string) {
   const user = await requireUser(returnTo);
   if (!user.roleChosen) redirect('/auth/choose-role');
   if (user.role !== role) redirect('/forbidden');
+  if (role === 'admin' && !await adminMfaVerified(authEnvironment().DB,user)) redirect('/admin/mfa');
   return user;
 }
 export async function requireUser(returnTo: string) {

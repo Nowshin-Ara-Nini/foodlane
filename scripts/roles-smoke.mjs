@@ -11,9 +11,12 @@ for (const path of ['/api/action','/api/data','/api/photo']) {
 }
 assert.equal((await fetch(origin + '/api/public/catalogue')).status,200);
 console.log('PASS public catalogue remains available anonymously');
-for (const path of ['/seller','/review','/admin','/auth/choose-role']) {
+for (const path of ['/seller','/admin','/admin/mfa','/auth/choose-role']) {
   const response = await fetch(origin + path,{redirect:'manual'});
   assert.equal(response.status,307,path);
   assert.match(response.headers.get('location'),/\/auth\/login/);
   console.log(`PASS anonymous ${path}: login redirect`);
 }
+
+assert.equal((await fetch(origin + '/review',{redirect:'manual'})).headers.get('location'),'/admin');
+console.log('PASS legacy review desk redirects to /admin');

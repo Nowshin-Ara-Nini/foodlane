@@ -46,6 +46,7 @@ export async function handleAuth(request: Request, env: AuthEnvironment, auth = 
     const base = authOrigin(env.AUTH_BASE_URL, env.AUTH_ALLOW_LOCAL_HTTP === 'true');
     const url = new URL(request.url);
     if (url.origin !== base) return json({ error: 'Invalid request origin.' }, 403);
+    if(!['GET','POST'].includes(request.method))return json({error:'Method not allowed.'},405);
     const path = url.pathname.slice('/api/auth'.length);
     if (!(request.method === 'POST' ? publicPosts : publicGets).has(path)) return json({ error: 'Not found.' }, 404);
     if (request.method === 'POST' && (request.headers.get('origin') !== base || request.headers.get('sec-fetch-site') === 'cross-site')) return json({ error: 'Invalid request origin.' }, 403);

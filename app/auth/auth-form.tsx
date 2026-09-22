@@ -27,7 +27,7 @@ export default function AuthForm({ screen }: { screen: Screen }) {
     try {
       if (screen === 'login') {
         await call('sign-in/email', { email, password });
-        window.location.assign('/auth/choose-role?returnTo=' + encodeURIComponent(safeReturnPath(query.get('returnTo'))));
+        window.location.assign(new URL('/auth/choose-role?returnTo=' + encodeURIComponent(safeReturnPath(query.get('returnTo'))),window.location.origin).href);
       } else if (screen === 'signup') {
         const data = await call('sign-up/email', { email, password, name: form.get('name'), signupRole, callbackURL: '/auth/login' });
         setMessage(data.message ?? 'Check your email.'); setDone(true);

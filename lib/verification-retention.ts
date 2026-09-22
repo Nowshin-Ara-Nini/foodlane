@@ -1,3 +1,5 @@
+import { fingerprint } from './api-security';
+import type { AuthEnvironment } from './auth';
 import { audit, fileBucket, type PrivateEnvironment, type FileRecord } from './private-verification';
 
 // Durable jobs are the file rows themselves. Re-running a successful R2 delete is safe.
@@ -12,11 +14,12 @@ export async function cleanupVerificationFiles(env: PrivateEnvironment, now = ne
         .bind(row.id,row.object_key,now,now).run();
       if (!claimed.meta.changes) continue;
       await fileBucket(env,row.bucket).delete(row.object_key);
-      if (row.kind === 'account-delete' || row.kind === 'legacy') {
-        await env.DB.prepare('DELETE FROM verification_files WHERE id=? AND object_key=?').bind(row.id,row.object_key).run();
-      } else {
-        await env.DB.prepare("UPDATE verification_files SET object_key=NULL,state='deleted',deleted_at=?,next_attempt_at=NULL WHERE id=? AND object_key=?").bind(now,row.id,row.object_key).run();
-      }
+      // Account deletion may have changed the kind while the R2 delete was in
+      // flight. Read the current kind in the transaction, not our stale snapshot.
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM verification_files WHERE id=? AND object_key=? AND kind IN ('account-delete','legacy')").bind(row.id,row.object_key),
+        env.DB.prepare("UPDATE verification_files SET object_key=NULL,state='deleted',deleted_at=?,next_attempt_at=NULL WHERE id=? AND object_key=?").bind(now,row.id,row.object_key),
+      ]);
       deleted++;
     } catch {
       failed++;
@@ -28,14 +31,14 @@ export async function cleanupVerificationFiles(env: PrivateEnvironment, now = ne
   return { deleted, failed, scanned: rows.results.length };
 }
 
-// Internal primitive only. Step 6 will expose it behind reauthentication.
+// Called only after session-bound reauthentication, or by the test-only Worker.
 // Data/session revocation and enqueueing are one D1 transaction; R2 work is retryable.
-export async function deleteAccountData(env: PrivateEnvironment, userId: string) {
+export async function deleteAccountData(env: PrivateEnvironment & AuthEnvironment, userId: string) {
   const seller = await env.DB.prepare('SELECT id FROM sellers WHERE owner=?').bind(userId).first<{id:string}>();
-  const now = new Date().toISOString(), subject = seller?.id ?? crypto.randomUUID();
+  const now = new Date().toISOString(), subject = seller?.id ?? userId;
   const statements: D1PreparedStatement[] = [];
   if (seller) {
-    statements.push(
+      statements.push(
       // Track legacy food images too, even if they predate managed uploads.
       env.DB.prepare(`INSERT INTO verification_files(id,subject,kind,bucket,object_key,state,created_at,delete_after)
         SELECT 'account-'||id,?,'account-delete','media',image,'deleting',?,? FROM foods WHERE seller_id=? AND image NOT IN (SELECT object_key FROM verification_files WHERE object_key IS NOT NULL)`).bind(subject,now,now,subject),
@@ -51,13 +54,14 @@ export async function deleteAccountData(env: PrivateEnvironment, userId: string)
       env.DB.prepare('DELETE FROM sellers WHERE id=?').bind(subject),
     );
   }
+  for(const scope of ['read','write','report','delete-email','delete-confirm'])statements.push(env.DB.prepare('DELETE FROM auth_limits WHERE key=?').bind(await fingerprint(env,`api:${scope}:${userId}`)));
   statements.push(
     env.DB.prepare('DELETE FROM interests WHERE user_id=?').bind(userId),
     env.DB.prepare('DELETE FROM reviews WHERE user_id=?').bind(userId),
     env.DB.prepare('DELETE FROM auth_sessions WHERE user_id=?').bind(userId),
     env.DB.prepare('DELETE FROM auth_accounts WHERE user_id=?').bind(userId),
     env.DB.prepare('DELETE FROM auth_verifications WHERE identifier=(SELECT email FROM auth_users WHERE id=?) OR value=?').bind(userId,userId),
-    env.DB.prepare('DELETE FROM auth_limits WHERE key=?').bind(`upload:${userId}`),
+    env.DB.prepare('DELETE FROM auth_limits WHERE key IN (?,?)').bind(`upload:${userId}`,`admin-mfa:${userId}`),
     env.DB.prepare('DELETE FROM auth_users WHERE id=?').bind(userId),
     audit(env.DB,subject,'account_deleted',null,now),
   );

@@ -6,10 +6,10 @@ Implement one step at a time. After each, report changes, checks, limitations an
 
 1. Authentication: implemented locally; approved to proceed to step 2.
 2. Server-side roles and adult seller eligibility: implemented; approved to proceed to step 3.
-3. Private verification, consent, image sanitization and retention: implemented locally; current approval checkpoint.
-4. Admin review, mandatory MFA and audit panel: not started.
-5. Maps, near-me, seller-level interest/reviews: not started.
-6. Abuse protection, account deletion and privacy policy: not started.
+3. Private verification, consent, image sanitization and retention: implemented locally; approved to proceed to step 4.
+4. Admin review, mandatory MFA and audit panel: implemented locally; approved to proceed to step 5.
+5. Maps, near-me, seller-level interest/reviews: implemented locally; approved to proceed to step 6.
+6. Abuse protection, account deletion and privacy policy: implemented locally; final approval checkpoint, with deployment checks still outstanding.
 
 ## Step 1 implementation
 
@@ -147,3 +147,36 @@ New migration: `0006_private_verification.sql` (applied locally). It follows the
 30 tests, TypeScript, production build, built HTTP smoke checks and direct dispatch of the built scheduled handler pass. Existing whole-project lint issues remain; newly added server modules/scripts/tests are clean. Production bucket privacy, deployed Images/CPU/cron behavior and interactive browser journeys remain to be checked. Mandatory admin MFA and its denial tests belong to step 4. Account deletion's internal cleanup primitive is tested; the reauthenticated user endpoint belongs to step 6.
 
 Step 4 has not started. Wait for explicit owner approval.
+
+
+## Step 4 checkpoint
+
+`/admin` now contains the review desk and paginated minimal audit history; `/review` redirects there. Mandatory TOTP enrollment and session-bound MFA apply to every admin data route, including document access and Google-origin sessions. Recovery codes are one-time and hashed. Admin pages and responses are non-cacheable. The seller dashboard supports requesting renewed review for place-photo changes.
+
+Migration `0007_admin_mfa.sql` was applied locally; the audit table remains from 0006. No remote migration or deployment occurred. 43 tests, TypeScript, production build and targeted lint pass. Built HTTP journeys cover enrollment, admin access, logout and recovery. Existing full-project lint failures and unavailable interactive browser/live-provider checks are documented in [ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md).
+
+Step 5 has not started. Stop and wait for explicit owner approval.
+
+
+## Step 5 checkpoint
+
+Leaflet/OpenStreetMap replaces embedded Google maps. Sellers select a draggable pin in profile and verification forms. `/map` supports geolocation or manual point selection, approved-seller markers, a default 5 km radius (maximum 100 km), exact distance ordering and pagination. `/sellers/[id]` shows the public place/photo, consented portrait, available foods, seller rating, and buyer interest/review controls.
+
+Engagement belongs to sellers rather than dishes. Database primary keys prevent duplicate buyer/seller pairs. Interest is idempotent; review creation returns 409 on a duplicate; `/api/buyer/review/edit` updates only the caller's review. Dashboard totals count distinct interested buyers. Existing account cleanup cascades through the new engagement records.
+
+Migration `0008_seller_engagement.sql` adds engagement tables/constraints and discovery indexes, merges legacy food interests, and keeps each buyer's latest food review per seller. It clears retired food engagement rows after transfer. Migration history 0000-0007 is unchanged. Applied locally only.
+
+Checks and pending manual/deployment work are documented in [DISCOVERY_RUNBOOK.md](DISCOVERY_RUNBOOK.md). Step 5 was subsequently approved. See the step 6 checkpoint below.
+
+
+## Step 6 checkpoint
+
+Buyer abuse reports and MFA-protected admin dismissal, suspension and lifting workflows are implemented. Suspensions have an independent record checked by discovery, media and writes. Lifting a suspension requires renewed verification before publication.
+
+Account deletion is available at `/account`. A 128-bit, single-use confirmation code is emailed to the verified address, expires in 10 minutes and is bound to the current session. This supports password and Google accounts; admins also require session MFA. Deletion revokes access, removes structured data and cascades through engagement/reports, then processes retryable file jobs. A 202 response explicitly reports remaining file work.
+
+Persistent API, upload, report and deletion limits, bounded inputs, exact-origin CSRF checks, HTTPS/security headers, scheduled expiry cleanup and generic operational logging are in place. `/privacy` publishes the owner-provided contact `nowshinaranini@gmail.com`, collected data, public/optional consent, processors, retention and deletion details. Legacy UI typing/lint problems were fixed without changing the design.
+
+`0009_abuse_deletion.sql` adds report, suspension and deletion-challenge tables; applied locally only. See [SECURITY_RUNBOOK.md](SECURITY_RUNBOOK.md) for full migrations, checks, acceptance results and remaining deployment gates. All six steps are implemented locally; no remote migration or public activation has occurred. Stop for owner review.
+
+Final local checks: 53 tests pass, TypeScript passes, full-project lint passes without warnings, production build passes, and local scheduled cleanup succeeds. Interactive browser journeys, live Google/Resend, remote R2 privacy and deployed hashing CPU remain unverified release gates.
