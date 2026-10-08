@@ -74,3 +74,10 @@ No browser is connected to the available automation tool. Before release, manual
 ## Final-step update
 
 Step 6 is now implemented locally, including report moderation, reauthenticated account deletion, API limits and privacy policy. Earlier checkpoint statements about pending step 6 work or full-project lint failures are historical. See [SECURITY_RUNBOOK.md](SECURITY_RUNBOOK.md) for current results and deployment blockers.
+
+## Explore map update, 7 October 2026
+Explore map now uses Google Maps for the searched address or selected public seller pin. Each seller has Show on map, profile and Google Maps directions actions. Sample sellers are excluded.
+The search form accepts road/landmark, neighborhood, city and district instead of visible coordinates. Duplicate city/district names are removed. Named searches match all comma-separated parts against published serving addresses; no geocoding or radius is implied. Google resolves the corresponding map address separately. Near me still uses internal coordinates and exact distance, with a default 5 km radius and a maximum of 100 km.
+GET /api/public/sellers accepts location (1-400 characters, comma-separated address parts) as well as existing seller name search and near-me parameters. Empty, punctuation-only and duplicate location parameters fail validation. Pending/suspended sellers remain excluded.
+The Google consumer map embed was verified in the browser for Dhaka and Road 12, Gulshan 1, Dhaka. Search/directions links use the documented Maps URLs: https://developers.google.com/maps/documentation/urls/get-started .
+Privacy copy describes both providers. Seller pin editors and other existing map views retain their Leaflet workflow. No new migration or Maps Platform billing setup was required.

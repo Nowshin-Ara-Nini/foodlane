@@ -125,7 +125,7 @@ export async function withdrawPortrait(env: PrivateEnvironment, sellerId: string
   ]);
 }
 export async function decideVerification(env: PrivateEnvironment, adminId: string, data: { id: string; status: 'verified'|'rejected'; note: string; eligibility: 'adult'|'underage'|'unconfirmed' }) {
-  const v = await env.DB.prepare("SELECT id,seller_id,age,portrait_consent FROM seller_verifications WHERE id=? AND status='pending'").bind(data.id).first<{ id: string; seller_id: string; age: number; portrait_consent: number }>();
+  const v = await env.DB.prepare("SELECT id,seller_id,age,portrait_consent FROM seller_verifications WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM sellers s JOIN auth_users u ON u.id=s.owner WHERE s.id=seller_id AND u.account_status='active')").bind(data.id).first<{ id: string; seller_id: string; age: number; portrait_consent: number }>();
   if (!v) throw new HttpError(409, 'This submission has already been reviewed or is unavailable.');
   const underage = data.eligibility === 'underage' || v.age < 18, status = underage ? 'rejected' : data.status;
   if (status === 'verified' && data.eligibility !== 'adult') throw new HttpError(400, 'Confirm the applicant is at least 18 from their evidence before approval.');
@@ -143,7 +143,7 @@ export async function decideVerification(env: PrivateEnvironment, adminId: strin
     }
   }
   const statements = [
-    env.DB.prepare("UPDATE seller_verifications SET status=?,reviewed_by=?,reviewed_at=?,decision_note=?,decision_id=?,retention_due_at=? WHERE id=? AND status='pending'")
+    env.DB.prepare("UPDATE seller_verifications SET status=?,reviewed_by=?,reviewed_at=?,decision_note=?,decision_id=?,retention_due_at=? WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM sellers s JOIN auth_users u ON u.id=s.owner WHERE s.id=seller_id AND u.account_status='active')")
       .bind(status,adminId,now,underage?'Applicants must be at least 18 years old.':data.note,decision,due,v.id),
     env.DB.prepare(`UPDATE sellers SET status=CASE WHEN EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) THEN 'suspended' ELSE ? END,updated=?,address=(SELECT place_address FROM seller_verifications WHERE id=?),lat=(SELECT place_lat FROM seller_verifications WHERE id=?),lng=(SELECT place_lng FROM seller_verifications WHERE id=?) WHERE id=? AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`)
       .bind(status,now,v.id,v.id,v.id,v.seller_id,v.id,decision),

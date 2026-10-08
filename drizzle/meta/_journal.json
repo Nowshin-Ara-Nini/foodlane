@@ -71,6 +71,34 @@
       "when": 1790076062676,
       "tag": "0009_abuse_deletion",
       "breakpoints": true
+    },
+    {
+      "tag": "0010_supabase_auth",
+      "breakpoints": true,
+      "when": 1791023496938,
+      "version": "6",
+      "idx": 10
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1791309734120,
+      "tag": "0011_common_black_crow",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1791388657814,
+      "tag": "0012_spotty_alex_power",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1791395856313,
+      "tag": "0013_lucky_domino",
+      "breakpoints": true
     }
   ]
 }

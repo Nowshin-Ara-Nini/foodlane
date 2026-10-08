@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { HttpError } from './permissions';
+import { locationTerms } from './location-search';
 
 const R = 6371.0088;
 const rad = (degrees: number) => degrees * Math.PI / 180;
@@ -16,23 +17,28 @@ export function bounds(lat: number, lng: number, radius: number) {
   const delta = deg(Math.asin(Math.min(1, Math.sin(angle) / Math.cos(rad(lat)))));
   return { south, north, west: wrap(lng - delta), east: wrap(lng + delta) };
 }
-export type PublicSeller = { id: string; name: string; bio: string; place_label: string; lat: number; lng: number; hours: string; status: string; rating: number | null; review_count: number; interest_count: number; place: string | null; portrait: string | null; distance_km?: number };
+export type PublicSeller = { id: string; name: string; bio: string; place_label: string; lat: number; lng: number; hours: string; status: string; rating: number | null; review_count: number; interest_count: number; recommendation_count: number; place: string | null; portrait: string | null; distance_km?: number };
 export const sellerProjection = `s.id,s.name,s.bio,s.address place_label,s.lat,s.lng,s.hours,s.status,
   (SELECT AVG(rating) FROM seller_reviews WHERE seller_id=s.id) rating,
   (SELECT COUNT(*) FROM seller_reviews WHERE seller_id=s.id) review_count,
   (SELECT COUNT(*) FROM seller_interests WHERE seller_id=s.id) interest_count,
+  (SELECT COUNT(*) FROM seller_recommendations WHERE seller_id=s.id) recommendation_count,
   CASE WHEN EXISTS(SELECT 1 FROM verification_files vf JOIN seller_verifications v ON v.id=vf.submission_id WHERE v.seller_id=s.id AND v.status='verified' AND vf.kind='public-place' AND vf.state='attached' AND vf.delete_after IS NULL) THEN '/api/public/sellers/'||s.id||'/place' ELSE NULL END place,
   CASE WHEN EXISTS(SELECT 1 FROM verification_files vf JOIN seller_verifications v ON v.id=vf.submission_id WHERE v.seller_id=s.id AND v.status='verified' AND v.portrait_consent=1 AND v.portrait_withdrawn_at IS NULL AND vf.kind='portrait' AND vf.state='attached' AND vf.delete_after IS NULL) THEN '/api/public/sellers/'||s.id||'/portrait' ELSE NULL END portrait`;
 const coordinate = (min: number, max: number) => z.string().trim().min(1).pipe(z.coerce.number<string>().finite().min(min).max(max));
-const querySchema = z.object({ lat: coordinate(-90,90).optional(), lng: coordinate(-180,180).optional(), radius: coordinate(0.1,100).default(5), page: coordinate(1,10000).pipe(z.number().int()).default(1), limit: coordinate(1,100).pipe(z.number().int()).default(20) }).strict();
+const querySchema = z.object({ lat: coordinate(-90,90).optional(), lng: coordinate(-180,180).optional(), radius: coordinate(0.1,100).default(5), search: z.string().trim().max(80).optional(), location: z.string().trim().min(1).max(400).refine(value => locationTerms(value).length > 0, 'Enter a location.').optional(), page: coordinate(1,10000).pipe(z.number().int()).default(1), limit: coordinate(1,100).pipe(z.number().int()).default(20) }).strict();
 export async function discoverSellers(db: D1Database, url: URL) {
   if (new Set(url.searchParams.keys()).size !== [...url.searchParams.keys()].length) throw new HttpError(400,'Duplicate search parameters.');
   const q = querySchema.parse(Object.fromEntries(url.searchParams));
   if ((q.lat === undefined) !== (q.lng === undefined)) throw new HttpError(400,'Both latitude and longitude are required.');
-  const values: number[] = []; let filter = '';
+  const values: (number|string)[] = []; let filter = '';
+  if (q.search) { filter += ' AND (instr(lower(s.name),lower(?))>0 OR instr(lower(s.address),lower(?))>0)'; values.push(q.search,q.search); }
+  if (q.location) {
+    for (const term of locationTerms(q.location)) { filter += ' AND instr(lower(s.address),lower(?))>0'; values.push(term); }
+  }
   if (q.lat !== undefined && q.lng !== undefined) {
     const b = bounds(q.lat,q.lng,q.radius);
-    filter = ` AND s.lat BETWEEN ? AND ? AND (s.lng >= ? ${b.west > b.east ? 'OR' : 'AND'} s.lng <= ?)`;
+    filter += ` AND s.lat BETWEEN ? AND ? AND (s.lng >= ? ${b.west > b.east ? 'OR' : 'AND'} s.lng <= ?)`;
     values.push(b.south,b.north,b.west,b.east);
   }
   // Do not LIMIT the bounding-box candidates: exact radius filtering and sorting precede pagination.

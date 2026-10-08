@@ -1,12 +1,14 @@
+import { catalogue } from './catalogue';
+import { accountDirectory, accountDecision, cleanupStatus, retryCleanup } from './admin-accounts';
 import { rateLimit, RateLimitError } from './api-security';
-import { sendDeletionCode, confirmDeletion } from './account-deletion';
+import { confirmDeletion } from './account-deletion';
 import { reportSeller, reports, moderate, liftSuspension } from './moderation';
 import { discoverSellers, sellerDetails } from './discovery';
 import { z } from 'zod';
 import { handleAdminMfa, requireAdminMfa } from './admin-mfa';
 import { auditHistory } from './admin-review';
-import { type AuthEnvironment, type AuthMail } from './auth';
-import { authOrigin } from './auth-policy';
+import { type AuthEnvironment } from './auth';
+import { authOrigin, AuthUnavailableError } from './auth-policy';
 import { HttpError, requireIdentity, requireRole, sessionUser, type AppUser } from './permissions';
 import { sanitizeImage } from './image-sanitization';
 import { submitVerification, adminQueue, privateDocument, decideVerification, publicVerificationMedia, withdrawPortrait, stageFile, type PrivateEnvironment } from './private-verification';
@@ -15,7 +17,7 @@ export interface FoodlaneEnvironment extends AuthEnvironment, PrivateEnvironment
 const text = (max: number) => z.string().trim().min(1).max(max);
 const number = (min: number, max: number) => z.union([z.number(), z.string().min(1)]).pipe(z.coerce.number<string | number>().finite().min(min).max(max));
 const profileInput = z.object({ name: text(100), bio: text(700), address: text(250), hours: text(150), lat: number(-90, 90), lng: number(-180, 180) }).strict();
-const foodInput = z.object({ id: text(100).optional(), name: text(120), description: text(700), category: text(50), price: number(1, 100000), image: text(250), available: z.boolean() }).strict();
+const foodInput = z.object({ id: text(100).optional(), name: text(120), description: text(700), category: text(50), price: number(1, 100000), image: text(250), available: z.boolean(), originalPrice: number(1,100000).nullable().optional(), offerLabel: z.string().trim().max(80).optional() }).strict();
 type Seller = { id: string; name: string; status: string; lat: number; lng: number; address: string };
 function json(body: unknown, status = 200) { return Response.json(body, { status, headers: { 'Cache-Control': 'private, no-store' } }); }
 function storage(env: FoodlaneEnvironment) { if (!env.BUCKET) throw new HttpError(503, 'Storage unavailable.'); return env.BUCKET; }
@@ -48,13 +50,32 @@ async function ownSeller(db: D1Database, user: AppUser) {
   return seller;
 }
 function approved(seller: Seller) { if (seller.status !== 'verified') throw new HttpError(403, 'Seller approval is required.'); }
+async function storeProfilePhoto(env: FoodlaneEnvironment,userId:string,file:File) {
+  const bytes=await sanitizeImage(file,env.IMAGES), id=crypto.randomUUID(), key='profile/'+userId+'/'+id+'.png', now=new Date().toISOString();
+  const inserted=await env.DB.prepare("INSERT INTO verification_files(id,subject,kind,bucket,object_key,state,created_at,delete_after) SELECT ?,?,'profile-photo','media',?,'staging',?,? WHERE EXISTS(SELECT 1 FROM auth_users WHERE id=?)")
+    .bind(id,userId,key,now,new Date(Date.parse(now)+3600000).toISOString(),userId).run();
+  if(!inserted.meta.changes)throw new HttpError(409,'Account no longer available.');
+  await storage(env).put(key,bytes,{httpMetadata:{contentType:'image/png',cacheControl:'private, no-store'}});
+  const previous=await env.DB.prepare('SELECT image FROM auth_users WHERE id=?').bind(userId).first<{image:string|null}>();
+  if(!previous) {
+    const removedAt=new Date().toISOString();
+    await env.DB.prepare("UPDATE verification_files SET kind='account-delete',state='deleting',delete_after=?,next_attempt_at=NULL WHERE id=? AND object_key=?").bind(removedAt,id,key).run();
+    throw new HttpError(409,'Upload cancelled because the account changed.');
+  }
+  const attached=await env.DB.batch([
+    env.DB.prepare("UPDATE auth_users SET image=?,updated_at=? WHERE id=? AND account_status='active'").bind(key,Date.now(),userId),
+    env.DB.prepare("UPDATE verification_files SET state='attached',delete_after=NULL WHERE id=? AND subject=? AND object_key=? AND state='staging' AND EXISTS(SELECT 1 FROM auth_users WHERE id=? AND image=?)").bind(id,userId,key,userId,key),
+    ...(previous.image?.startsWith('profile/'+userId+'/') ? [env.DB.prepare("UPDATE verification_files SET kind='account-delete',state='deleting',delete_after=?,next_attempt_at=NULL WHERE subject=? AND object_key=? AND kind='profile-photo'").bind(now,userId,previous.image)] : []),
+  ]);
+  if(!attached[0].meta.changes||!attached[1].meta.changes)throw new HttpError(409,'Upload cancelled because the account changed.');
+}
 async function imageResponse(env: FoodlaneEnvironment, key: string) {
   const object = await storage(env).get(key);
   if (!object) throw new HttpError(404, 'Photo not found.');
   return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType ?? 'image/jpeg', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 }
 
-export async function handleFoodlane(request: Request, env: FoodlaneEnvironment, sendMail?: (mail:AuthMail)=>Promise<void>) {
+export async function handleFoodlane(request: Request, env: FoodlaneEnvironment) {
   try {
     const url = new URL(request.url);
     const [, , area, ...parts] = url.pathname.split('/');
@@ -62,8 +83,8 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
     if (!['public', 'account', 'buyer', 'seller', 'admin'].includes(area)) throw new HttpError(404, 'Not found.');
     const origin = authOrigin(env.AUTH_BASE_URL,env.AUTH_ALLOW_LOCAL_HTTP==='true');
     if(url.origin!==origin)throw new HttpError(403,'Invalid request origin.');
-    if(request.url.length>2048||parts.some(p=>p.length>100))throw new HttpError(400,'Invalid request path.');
-    const allowedQuery = area==='public'&&path==='sellers' ? ['lat','lng','radius','page','limit'] : area==='public'&&/^sellers\/[^/]+$/.test(path) ? ['page'] : area==='admin'&&path==='audit' ? ['cursor','limit'] : area==='admin'&&path==='reports' ? ['page'] : [];
+    if(request.url.length>(area==='public'&&path==='catalogue'?4096:2048)||parts.some(p=>p.length>100))throw new HttpError(400,'Invalid request path.');
+    const allowedQuery = area==='account'&&path==='profile-photo' ? ['v'] : area==='public'&&path==='catalogue' ? ['search','cuisines','places','collection','page','limit'] : area==='public'&&path==='sellers' ? ['lat','lng','radius','page','limit','search','location'] : area==='public'&&/^sellers\/[^/]+$/.test(path) ? ['page'] : area==='admin'&&path==='accounts' ? ['search','role','status','page'] : area==='admin'&&path==='audit' ? ['cursor','limit'] : area==='admin'&&path==='reports' ? ['page'] : [];
     const queryKeys=[...url.searchParams.keys()];
     if(queryKeys.some(k=>!allowedQuery.includes(k))||new Set(queryKeys).size!==queryKeys.length)throw new HttpError(400,'Invalid query parameters.');
     await rateLimit(env,'ip',request.headers.get('cf-connecting-ip')??'local-or-unknown',300,60);
@@ -90,35 +111,58 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
         .bind(`upload:${user!.userId}`,clock+600000,clock,clock).first<{count:number}>();
       if (!rate || rate.count > 10) throw new RateLimitError(600);
     }
-    if (area === 'account' && path === 'me' && request.method === 'GET') return json({ user: { name: user!.name, role: user!.role, roleChosen: user!.roleChosen } });
-    if(area==='account'&&['deletion-code','delete'].includes(path)&&request.method==='POST') {
-      if(user!.role==='admin')await requireAdminMfa(db,user);
-      const raw=await input(request);
-      if(path==='deletion-code'){z.object({}).strict().parse(raw);return json(await sendDeletionCode(env,user!,sendMail));}
-      const result=await confirmDeletion(env,user!,raw);
-      const response=json(result,result.filesPending?202:200);
-      for(const name of ['better-auth.session_token','__Secure-better-auth.session_token','better-auth.session_data','__Secure-better-auth.session_data'])response.headers.append('Set-Cookie',`${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${origin.startsWith('https:')?'; Secure':''}`);
-      return response;
+    if (area === 'account' && path === 'me' && request.method === 'GET') return json({ user: { name: user!.name, email: user!.email ?? null, image: user!.image?.startsWith('profile/') ? '/api/account/profile-photo' : user!.image ?? null, phone: user!.phone ?? null, role: user!.role, roleChosen: user!.roleChosen } });
+    if (area === 'account' && path === 'profile-photo' && request.method === 'GET') {
+      const row = await db.prepare('SELECT image FROM auth_users WHERE id=?').bind(user!.userId).first<{image:string|null}>();
+      if (!row?.image || !row.image.startsWith('profile/'+user!.userId+'/') || !row.image.endsWith('.png')) throw new HttpError(404,'Photo not found.');
+      return await imageResponse(env,row.image);
     }
-    if (area === 'account' && path === 'role' && request.method === 'POST') {
-      const { role } = z.object({ role: z.enum(['buyer', 'seller']) }).strict().parse(await input(request));
-      const result = await db.prepare("UPDATE auth_users SET role = ?, role_chosen = 1, updated_at = ? WHERE id = ? AND role_chosen = 0 AND role != 'admin'").bind(role, Date.now(), user!.userId).run();
-      if (!result.meta.changes) throw new HttpError(409, 'Your account role has already been chosen.');
-      return json({ ok: true, role });
+    if (area === 'account' && ['profile','role'].includes(path) && request.method === 'POST') {
+      const isRoleSetup = path === 'role';
+      const dataForm = await form(request,5*1024*1024+16384);
+      const name = text(100).parse(dataForm.get('name'));
+      const phoneRaw = String(dataForm.get('phone') ?? '').trim();
+      const phone = phoneRaw || null;
+      if (phone && (!/^[+0-9 ()-]+$/.test(phone) || phone.replace(/\D/g,'').length < 7 || phone.replace(/\D/g,'').length > 15)) throw new HttpError(400,'Enter a valid mobile number.');
+      const photo = dataForm.get('profilePhoto');
+      const photoFile = photo instanceof File && photo.size ? photo : null;
+      const removePhoto = dataForm.get('removePhoto') === 'true';
+      const useGooglePhoto = dataForm.get('useGooglePhoto') === 'true';
+      if (removePhoto && photoFile) throw new HttpError(400,'Choose a new photo or remove the current one.');
+      if (isRoleSetup) {
+        const role = z.enum(['buyer','seller']).parse(dataForm.get('role'));
+        if (role === 'buyer' && !phone) throw new HttpError(400,'Add a mobile number to finish your buyer profile.');
+        if (photoFile) await storeProfilePhoto(env,user!.userId,photoFile);
+        const result = await db.prepare("UPDATE auth_users SET name=?,phone=?,image=CASE WHEN ?=1 OR ?=1 THEN image ELSE NULL END,role=?,role_chosen=1,updated_at=? WHERE id=? AND account_status='active' AND role_chosen=0 AND role!='admin'")
+          .bind(name,phone,useGooglePhoto?1:0,photoFile?1:0,role,Date.now(),user!.userId).run();
+        if (!result.meta.changes) throw new HttpError(409,'Your profile and account type have already been set.');
+        return json({ok:true,role});
+      }
+      if (!phone) throw new HttpError(400,'Enter a mobile number.');
+      const current = await db.prepare('SELECT image FROM auth_users WHERE id=?').bind(user!.userId).first<{image:string|null}>();
+      if (photoFile) await storeProfilePhoto(env,user!.userId,photoFile);
+      else if (removePhoto && current?.image) {
+        const now = new Date().toISOString();
+        await db.batch([
+          db.prepare("UPDATE auth_users SET name=?,phone=?,image=NULL,updated_at=? WHERE id=? AND account_status='active'").bind(name,phone,Date.now(),user!.userId),
+          ...(current.image.startsWith('profile/'+user!.userId+'/') ? [db.prepare("UPDATE verification_files SET kind='account-delete',state='deleting',delete_after=?,next_attempt_at=NULL WHERE subject=? AND object_key=? AND kind='profile-photo'").bind(now,user!.userId,current.image)] : []),
+        ]);
+        return json({ok:true});
+      }
+      await db.prepare("UPDATE auth_users SET name=?,phone=?,updated_at=? WHERE id=? AND account_status='active'").bind(name,phone,Date.now(),user!.userId).run();
+      return json({ok:true});
+    }
+    if(area==='account'&&path==='delete'&&request.method==='POST') {
+      if(user!.role==='admin')await requireAdminMfa(db,user);
+      const result=await confirmDeletion(env,user!,await input(request));
+      const response=json(result,result.deletionPending||result.cleanupPending||result.filesPending?202:200);
+      for(const name of ['foodlane_session','foodlane_pkce','foodlane_oauth_state'])response.headers.append('Set-Cookie',name+'=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'+(origin.startsWith('https:')?'; Secure':''));
+      return response;
     }
     if (area === 'public' && /^sellers\/[^/]+\/(portrait|place)$/.test(path) && request.method === 'GET') return await publicVerificationMedia(env,parts[1],parts[2]==='portrait'?'portrait':'public-place');
     if (area === 'public' && path === 'sellers' && request.method === 'GET') return json(await discoverSellers(db,url));
     if (area === 'public' && /^sellers\/[^/]+$/.test(path) && request.method === 'GET') return json(await sellerDetails(db,parts[1],url));
-    if (area === 'public' && path === 'catalogue' && request.method === 'GET') {
-      const foods = await db.prepare(`SELECT f.id, f.seller_id, f.name, f.description, f.price, f.category, f.available,
-        '/api/public/photos/' || f.id AS image, s.name seller_name, s.bio, s.address place_label, s.lat, s.lng, s.hours, s.status, s.updated,
-        (SELECT COUNT(*) FROM seller_interests i WHERE i.seller_id = s.id) interest_count,
-        (SELECT AVG(rating) FROM seller_reviews r WHERE r.seller_id = s.id) rating,
-        (SELECT COUNT(*) FROM seller_reviews r WHERE r.seller_id = s.id) review_count
-        FROM foods f JOIN sellers s ON s.id = f.seller_id WHERE f.available = 1 AND s.status = 'verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions sx WHERE sx.seller_id=s.id) ORDER BY f.rowid DESC LIMIT 200`).all();
-      const reviews = await db.prepare("SELECT r.seller_id,r.name,r.rating,r.body,r.created FROM seller_reviews r JOIN sellers s ON s.id=r.seller_id WHERE s.status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions sx WHERE sx.seller_id=s.id) ORDER BY r.created DESC LIMIT 500").all();
-      return json({ foods: foods.results, reviews: reviews.results });
-    }
+    if (area === 'public' && path === 'catalogue' && request.method === 'GET') return json(await catalogue(db,url));
     if (area === 'public' && /^photos\/[^/]+$/.test(path) && request.method === 'GET') {
       const row = await db.prepare("SELECT f.image FROM foods f JOIN sellers s ON s.id=f.seller_id WHERE f.id=? AND f.available=1 AND s.status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions sx WHERE sx.seller_id=s.id)").bind(parts[1]).first<{ image: string }>();
       if (!row) throw new HttpError(404, 'Photo not found.');
@@ -129,6 +173,26 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
       if (path === 'interests' && request.method === 'GET') {
         const rows = await db.prepare("SELECT i.seller_id FROM seller_interests i JOIN sellers s ON s.id=i.seller_id WHERE i.user_id=? AND s.status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions sx WHERE sx.seller_id=s.id)").bind(user!.userId).all();
         return json({ interests: rows.results });
+      }
+      if (/^feedback\/[^/]+$/.test(path) && request.method === 'GET') {
+        const seller = await db.prepare("SELECT id FROM sellers WHERE id=? AND status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id)").bind(parts[1]).first();
+        if (!seller) throw new HttpError(404,'Seller unavailable.');
+        const [review,recommendation] = await Promise.all([
+          db.prepare('SELECT rating,body,created,updated FROM seller_reviews WHERE seller_id=? AND user_id=?').bind(parts[1],user!.userId).first(),
+          db.prepare('SELECT 1 recommended FROM seller_recommendations WHERE seller_id=? AND user_id=?').bind(parts[1],user!.userId).first(),
+        ]);
+        return json({review,recommended:!!recommendation});
+      }
+      if (path === 'recommendation' && request.method === 'POST') {
+        const data = z.object({sellerId:text(100),recommended:z.boolean()}).strict().parse(await input(request));
+        const seller = await db.prepare("SELECT id FROM sellers WHERE id=? AND status='verified' AND owner!=? AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id)").bind(data.sellerId,user!.userId).first();
+        if (!seller) throw new HttpError(404,'Seller unavailable.');
+        if(data.recommended) {
+          await db.prepare("INSERT INTO seller_recommendations(seller_id,user_id,created) SELECT id,?,? FROM sellers WHERE id=? AND status='verified' AND owner!=? AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) ON CONFLICT(seller_id,user_id) DO NOTHING").bind(user!.userId,now,data.sellerId,user!.userId).run();
+        } else {
+          await db.prepare('DELETE FROM seller_recommendations WHERE seller_id=? AND user_id=?').bind(data.sellerId,user!.userId).run();
+        }
+        return json({ok:true});
       }
       if (/^reviews\/[^/]+$/.test(path) && request.method === 'GET') {
         const review = await db.prepare("SELECT r.rating,r.body,r.created,r.updated FROM seller_reviews r JOIN sellers s ON s.id=r.seller_id WHERE r.seller_id=? AND r.user_id=? AND s.status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions sx WHERE sx.seller_id=s.id)").bind(parts[1],user!.userId).first();
@@ -162,6 +226,7 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
         if (!seller) return json({ seller: null, ownFoods: [], submission: null, logs: [] });
         const foods = await db.prepare(`SELECT id,seller_id,name,description,price,category,available,
           '/api/seller/photos/' || substr(image, length('food/' || seller_id || '/') + 1, 36) AS image,
+          (SELECT original_price FROM food_offers WHERE food_id=foods.id) original_price,(SELECT label FROM food_offers WHERE food_id=foods.id) offer_label,
           (SELECT COUNT(*) FROM seller_interests i WHERE i.seller_id=foods.seller_id) interest_count FROM foods WHERE seller_id=?`).bind(seller.id).all();
         const submission = await db.prepare('SELECT id,status,created,reviewed_at,decision_note FROM seller_verifications WHERE seller_id=? ORDER BY created DESC,rowid DESC LIMIT 1').bind(seller.id).first();
         const logs = await db.prepare('SELECT action,created_at AS created FROM audit_log WHERE subject=? ORDER BY created_at DESC LIMIT 100').bind(seller.id).all();
@@ -176,11 +241,11 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
           const changed = data.name !== seller.name || data.address !== seller.address || data.lat !== seller.lat || data.lng !== seller.lng;
           const pending = await db.prepare("SELECT id FROM seller_verifications WHERE seller_id=? AND status='pending'").bind(seller.id).first();
           if (changed && pending) throw new HttpError(409, 'Wait for your pending review before changing identity or location.');
-          await db.prepare('UPDATE sellers SET name=?,bio=?,address=?,lat=?,lng=?,hours=?,updated=?,status=? WHERE id=? AND owner=? AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id)')
+          await db.prepare('UPDATE sellers SET name=?,bio=?,address=?,lat=?,lng=?,hours=?,updated=?,status=? WHERE id=? AND owner=? AND EXISTS(SELECT 1 FROM auth_users WHERE id=sellers.owner AND account_status=\'active\') AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id)')
             .bind(data.name, data.bio, data.address, data.lat, data.lng, data.hours, now, changed ? 'pending' : seller.status, seller.id, user!.userId).run();
         } else {
-          await db.prepare('INSERT INTO sellers (id,owner,name,phone,bio,address,lat,lng,hours,status,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-            .bind(crypto.randomUUID(), user!.userId, data.name, '', data.bio, data.address, data.lat, data.lng, data.hours, 'pending', now).run();
+          await db.prepare("INSERT INTO sellers (id,owner,name,phone,bio,address,lat,lng,hours,status,updated) SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM auth_users WHERE id=? AND account_status='active')")
+            .bind(crypto.randomUUID(), user!.userId, data.name, '', data.bio, data.address, data.lat, data.lng, data.hours, 'pending', now, user!.userId).run();
         }
         return json({ ok: true });
       }
@@ -201,6 +266,9 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
       if (path === 'food' && request.method === 'POST') {
         approved(seller);
         const data = foodInput.parse(await input(request));
+        if(data.originalPrice!=null&&data.originalPrice<=data.price)throw new HttpError(400,'The original price must exceed the offer price.');
+        if(data.offerLabel&&!data.originalPrice)throw new HttpError(400,'Add an original price for this offer.');
+        const foodId=data.id??crypto.randomUUID();
         if (data.id && !await db.prepare('SELECT id FROM foods WHERE id=? AND seller_id=?').bind(data.id, seller.id).first()) throw new HttpError(403, 'You can edit only your own food.');
         const match = /^\/api\/seller\/photos\/([a-f0-9-]{36})$/.exec(data.image);
         if (!match) throw new HttpError(400, 'Upload your own food photo first.');
@@ -211,10 +279,11 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
           ? db.prepare(`UPDATE foods SET name=?,description=?,price=?,category=?,image=?,available=? WHERE id=? AND seller_id=? AND ${allowed}`)
             .bind(data.name,data.description,data.price,data.category,key,data.available?1:0,data.id,seller.id,key,seller.id,seller.id,user!.userId)
           : db.prepare(`INSERT INTO foods SELECT ?,?,?,?,?,?,?,? WHERE ${allowed}`)
-            .bind(crypto.randomUUID(),seller.id,data.name,data.description,data.price,data.category,key,data.available?1:0,key,seller.id,seller.id,user!.userId);
+            .bind(foodId,seller.id,data.name,data.description,data.price,data.category,key,data.available?1:0,key,seller.id,seller.id,user!.userId);
         const results = await db.batch([
           db.prepare("UPDATE verification_files SET state='attached',delete_after=NULL WHERE object_key=? AND subject=? AND state IN ('staging','attached') AND (delete_after IS NULL OR delete_after>?) AND EXISTS(SELECT 1 FROM sellers WHERE id=? AND owner=? AND status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id))")
             .bind(key,seller.id,now,seller.id,user!.userId),change,
+          ...(data.originalPrice!=null ? [db.prepare(`INSERT INTO food_offers(food_id,original_price,label) SELECT id,?,? FROM foods WHERE id=? AND seller_id=? AND ${allowed} ON CONFLICT(food_id) DO UPDATE SET original_price=excluded.original_price,label=excluded.label`).bind(data.originalPrice,data.offerLabel??'',foodId,seller.id,key,seller.id,seller.id,user!.userId)] : [db.prepare(`DELETE FROM food_offers WHERE food_id=? AND EXISTS(SELECT 1 FROM foods WHERE id=? AND seller_id=? AND ${allowed})`).bind(foodId,foodId,seller.id,key,seller.id,seller.id,user!.userId)]),
         ]);
         if (!results[1].meta.changes) throw new HttpError(409,'Photo or seller status changed. Upload a new photo after approval.');
         return json({ ok: true });
@@ -239,6 +308,10 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
       }
     }
     if (area === 'admin') {
+      if(path==='accounts'&&request.method==='GET')return json(await accountDirectory(db,url,user!.userId));
+      if(path==='accounts/decision'&&request.method==='POST'){await rateLimit(env,'account-moderation',user!.userId,30,600);const result=await accountDecision(env,user!.userId,await input(request));return json(result,'deletionPending' in result&&result.deletionPending?202:200);}
+      if(path==='cleanup'&&request.method==='GET')return json(await cleanupStatus(db));
+      if(path==='cleanup/retry'&&request.method==='POST'){z.object({}).strict().parse(await input(request));await rateLimit(env,'cleanup-retry',user!.userId,3,600);return json(await retryCleanup(env));}
       if(path==='reports'&&request.method==='GET')return json(await reports(db,url,user!.userId));
       if(path==='reports/decision'&&request.method==='POST')return json(await moderate(db,user!.userId,await input(request)));
       if(path==='suspensions/lift'&&request.method==='POST')return json(await liftSuspension(db,user!.userId,await input(request)));
@@ -256,6 +329,7 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment,
     throw new HttpError(404, 'Not found.');
   } catch (error) {
     if (error instanceof RateLimitError) return new Response(JSON.stringify({error:error.message}),{status:429,headers:{'Content-Type':'application/json','Cache-Control':'private, no-store','Retry-After':String(error.retryAfter)}});
+    if (error instanceof AuthUnavailableError) return json({error:error.message},503);
     if (error instanceof HttpError) return json({ error: error.message }, error.status);
     if (error instanceof z.ZodError) return json({ error: 'Invalid fields. Check your input.' }, 400);
     console.error('FOODLANE_API_FAILED');

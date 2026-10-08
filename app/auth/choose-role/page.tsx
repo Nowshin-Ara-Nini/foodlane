@@ -7,5 +7,5 @@ export default async function RolePage({ searchParams }: { searchParams: Promise
   const user = await requireUser('/auth/choose-role');
   const returnTo = safeReturnPath((await searchParams).returnTo);
   if (user.roleChosen) redirect(returnTo === '/' && user.role === 'seller' ? '/seller' : returnTo);
-  return <ChooseRole returnTo={returnTo} />;
+  return <ChooseRole returnTo={returnTo} name={user.name} email={user.email} image={user.image} />;
 }

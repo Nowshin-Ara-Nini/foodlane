@@ -1,6 +1,10 @@
 # Foodlane final security checkpoint
 
-All six implementation steps are complete locally. Step 6 awaits owner review. **Public activation is not authorized yet:** live-provider, remote-storage, browser and deployed CPU checks below remain outstanding. No remote migration or deployment was run.
+All six implementation steps are implemented locally. The owner has requested completion of Step 6 and the remaining release checks. Public activation remains gated on the checks below. The fresh remote D1 schema is now migrated; the application Worker has not been deployed.
+
+## Current infrastructure status (2026-10-03)
+
+Cloudflare authentication and R2 activation are confirmed. The configured buckets are `foodlane-4589103-bd-media` (`BUCKET`) and `foodlane-private-12405-verifications` (`PRIVATE_VERIFICATIONS`). Read-only Cloudflare checks confirmed r2.dev access disabled and no custom domains on either bucket. This establishes bucket settings, not a deployed document-route or image-processing test. The target Workers plan is Free. A protected synthetic probe tested Better Auth scrypt on the deployed Workers runtime: hash creation passed 25/25 requests; verification passed 12/25 and then returned CPU resource-limit failures on 13/25. Wall time was recorded, but Cloudflare CPU-time metrics were not available. Standard scrypt is therefore not reliable on this Free runtime and blocks public account activation. A fresh empty APAC D1 database named `foodlane` is configured, and migrations 0000–0009 are applied. The account workers.dev subdomain `nowshinaranini.workers.dev` is registered. The application origin remains `https://foodlane.invalid` and `workers_dev=false`. The local `.dev.vars` file has an NID key ring but no Resend or Google OAuth credentials; its sender address is still a placeholder. No secret values were displayed.
 
 ## Step 6 behavior
 
@@ -47,15 +51,15 @@ Migration history is append-only:
 | `0008_seller_engagement` | Seller-level interest/reviews and discovery indexes; merges legacy dish engagement |
 | `0009_abuse_deletion` | Reports, independent suspensions and session-bound deletion challenges |
 
-0000–0009 are applied to local test D1. A fresh database must apply them all in order:
+Migrations 0000–0009 are applied to the local test D1 and to the fresh remote APAC D1 database named `foodlane` (ID `b614e824-94ac-4b70-b2b2-a09fa442115c`). Wrangler reports no migrations pending remotely. The database is empty apart from schema/history. For another fresh database, apply them in order:
 
 ```sh
 npm run db:migrate:local
-# Only against the configured fresh remote test database at the deployment gate:
+# Only against the configured fresh remote D1 database:
 npm run db:migrate:remote
 ```
 
-Configure direct Cloudflare deployment in `wrangler.jsonc`. Replace the placeholder database ID with the intended fresh database. Bind `DB`, `BUCKET`, `PRIVATE_VERIFICATIONS` and `IMAGES`. Both R2 buckets must have r2.dev access and custom domains disabled: all media, including public portraits, passes through Worker authorization/consent routes. Do not attach an R2 public domain, lifecycle rule or cache rule that bypasses these routes or erases retained passports. Configure the daily cron.
+Direct Cloudflare deployment is configured in `wrangler.jsonc` for the fresh `foodlane` D1 and the two verified private R2 buckets. Bind `DB`, `BUCKET`, `PRIVATE_VERIFICATIONS` and `IMAGES`. Both R2 buckets must have r2.dev access and custom domains disabled: all media, including public portraits, passes through Worker authorization/consent routes. Do not attach an R2 public domain, lifecycle rule or cache rule that bypasses these routes or erases retained passports. Configure the daily cron.
 
 Secrets and variables:
 
@@ -81,7 +85,7 @@ Provisioning revokes existing sessions. Sign in again, enroll TOTP at `/admin/mf
 
 ## Acceptance evidence
 
-Final local results: **53 tests passed** (52 source/integration/render tests plus one compiled-Worker journey), TypeScript passed, full-project lint passed with no errors or warnings, and the production build passed. Migration 0009 applied successfully. The built scheduler ran against local D1/R2 with `scheduled: ok` and zero pending jobs at that check. A regression test also covers account deletion changing a file job while cleanup is in flight, ensuring the successful delete leaves no stale job record.
+Revalidated on 2026-10-03: **54 tests passed** (52 source/integration/render tests, one compiled-Worker journey and one Chromium component journey), TypeScript and the production build passed. Full-project lint found no errors and one anonymous-export warning in the benchmark helper; that warning was fixed and the helper/new browser test were linted separately. Local migrations report no pending changes through 0009. The built scheduler returned `scheduled: ok` with zero pending jobs. A regression test also covers account deletion changing a file job while cleanup is in flight, ensuring the successful delete leaves no stale job record. The first Chromium attempt exceeded its overall startup timeout; the rerun with a longer allowance passed.
 
 Automated local acceptance covers:
 
@@ -104,15 +108,29 @@ npm run lint
 npm test
 npm run build
 npm run test:built
+npm run test:safety:browser
 ```
+
+The Step 6 browser suite uses real Chromium with the production account/moderation components and simulated API responses. It checks deletion error recovery, accurate pending-cleanup messaging and moderation conflicts. It does not replace integrated browser journeys, live email delivery or deployed authorization checks. Install its browser once using `npx playwright install chromium --only-shell`, with `PLAYWRIGHT_BROWSERS_PATH` set to `.wrangler/pw-browsers` (or another explicitly configured path).
 
 ## Outstanding release gates
 
-1. **Browser journeys:** no browser is connected to the available automation tool. HTTP rendering tests are not interactive browser tests. Check desktop/mobile maps, tile attribution, geolocation allow/deny, pin selection, buyer review/report, seller submission, MFA review/moderation and account deletion.
-2. **Live auth/email:** configure and test Google OAuth plus Resend verification, password-reset and deletion-code delivery. Local tests use a mail test double and do not establish external delivery.
-3. **Workers CPU:** confirm the Cloudflare plan and effective CPU cap; benchmark standard Better Auth scrypt on protected deployed staging and record CPU p50/p95/p99. Local workerd latency proves compatibility only. Bcrypt cost 12 was not selected without runtime evidence; do not weaken scrypt to fit an unconfirmed Free-plan cap.
-4. **Private infrastructure:** inspect both remote buckets for disabled r2.dev/custom domains; attempt anonymous retrieval of a test document; verify Images binding and cron; test deliberate R2 failures and monitor retries. Run migrations on fresh test resources, never cut over old sensitive data casually.
+1. **Integrated browser journeys:** Chromium is installed for isolated local checks. Still check the full application on desktop/mobile: maps, tile attribution, geolocation allow/deny, pin selection, buyer review/report, seller submission, MFA review/moderation and account deletion. Component tests with simulated APIs do not establish these end-to-end journeys.
+2. **Live auth:** verify the Google OAuth provider and exact callback URL after deployment. Supabase SMTP is not used for sign-in; separately confirm the account-deletion email delivery route if enabling account deletion.
+3. **Workers CPU:** the owner confirmed the Free plan. The protected deployed synthetic benchmark recorded 25/25 successful scrypt hash creations, but only 12/25 successful verifications; 13 verification requests hit CPU resource limits. Wall time is not CPU time, and p50/p95/p99 CPU metrics remain unavailable. Standard scrypt does not reliably fit this Free runtime. Keep the secure default and do not activate public authentication on this configuration; resolve the runtime/plan choice before release. Bcrypt cost 12 was not selected.
+4. **Private infrastructure:** both remote buckets have passed r2.dev/custom-domain configuration checks. Still attempt anonymous retrieval of a synthetic test document; verify deployed Images binding and cron; test deliberate R2 failures and monitor retries. The fresh remote database migration is complete; no real seller or verification data has been cut over.
 5. **Recovery/backups:** determine D1/provider recovery retention and restrict operators. Before restoring service from any backup, reapply account deletions using minimal opaque audit references and rerun file cleanup. Audit/account-delete markers must not be rolled back with a restore. Do not describe active-storage deletion as immediate erasure from provider-managed backups.
-6. **Final owner approval:** review this checkpoint and approve deployment only after these checks pass. `workers_dev=false`, `preview_urls=false`, and the placeholder DB ID remain in place. No public replacement has been activated.
+6. **Final owner approval:** review this checkpoint and approve deployment only after these checks pass. `workers_dev=false` and `preview_urls=false` remain in place. The configured D1 has the empty fresh schema. No public replacement has been activated.
 
 Provider references: [Better Auth account deletion and reauthentication](https://better-auth.com/docs/concepts/users-accounts), [Cloudflare Workers logging controls](https://developers.cloudflare.com/workers/observability/logs/workers-logs/).
+
+## Supabase Auth cutover
+
+The active auth API uses Google OAuth as its only sign-in method. Foodlane issues an opaque HttpOnly `foodlane_session` cookie and keeps provider access/refresh tokens in D1. New Google users choose a Foodlane display name, whether to show their Google profile photo, and a one-time buyer or seller role. Password and email-verification endpoints are disabled in the app; Supabase SMTP is not part of sign-in.
+
+Migration `0010_supabase_auth.sql` adds nullable provider-token columns to `auth_sessions`. The migration is included in Drizzle metadata. Focused Supabase OAuth tests, all 38 role/security integration tests, TypeScript checks, and the auth smoke checks pass locally. The migration has not been applied remotely, and this Google-only auth update has not been deployed.
+
+The server-only `SUPABASE_SECRET_KEY` is required for account deletion; the endpoint fails closed without it so deletion cannot leave an active Supabase identity behind. Follow [SUPABASE_AUTH_RUNBOOK.md](SUPABASE_AUTH_RUNBOOK.md) for dashboard provider setup, callback URLs, and secrets. Before release, disable the Supabase Email provider, apply the remote migration, and verify the Google callback and account deletion in the deployed Worker.
+## October 8 account moderation and recovery update
+
+Current local implementation supersedes the older email-deletion and password-runtime release notes above: Google is the only sign-in method. Account deletion uses durable cross-provider retry jobs; no confirmation email is used. Buyer/seller bans revoke Foodlane sessions and prevent sign-in. Admin account controls and cleanup health are documented in [ADMIN_ACCOUNTS_RUNBOOK.md](ADMIN_ACCOUNTS_RUNBOOK.md). Production migrations 0010�0013 and deployed provider/binding/cron smoke checks remain release gates. Password hashing CPU results above concern the retired application sign-in path.

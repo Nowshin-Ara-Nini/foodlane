@@ -15,5 +15,11 @@ declare namespace Cloudflare {
     GOOGLE_CLIENT_SECRET?: string;
     RESEND_API_KEY?: string;
     AUTH_EMAIL_FROM?: string;
+    SUPABASE_URL?: string;
+    SUPABASE_PUBLISHABLE_KEY?: string;
+    SUPABASE_SECRET_KEY?: string;
+    NEXT_PUBLIC_SUPABASE_URL?: string;
+    NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?: string;
+    TEST_ONLY_BETTER_AUTH?: string;
   }
 }

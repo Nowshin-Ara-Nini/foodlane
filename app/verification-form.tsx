@@ -1,29 +1,31 @@
 'use client';
-/* eslint-disable @next/next/no-img-element -- Private document requests must reach the MFA/audit route directly, never an optimizer cache. */
+/* eslint-disable @next/next/no-img-element -- Local object URLs power upload previews; private document requests bypass the image optimizer. */
 import LocationMap from './location-map';
+import ImageUpload from './image-upload';
 import {useState} from 'react';
 import {ClipboardCheck,Navigation} from 'lucide-react';
 import {Select,SelectTrigger,SelectValue,SelectContent,SelectItem} from '@/components/ui/select';
 import {toast} from 'sonner';
 export default function VerificationForm({busy,save,seller}:{busy:boolean;save:(body:FormData,message:string)=>Promise<boolean>;seller:{lat:number;lng:number;place_label:string}}){
 const [gender,setGender]=useState('');
+const [uploadKey,setUploadKey]=useState(0);
 const [lat,setLat]=useState(String(seller.lat??'')),[lng,setLng]=useState(String(seller.lng??''));
 const [locating,setLocating]=useState(false);
 function locate(){if(!navigator.geolocation){toast.error('Location is unavailable. Enter coordinates instead.');return}setLocating(true);navigator.geolocation.getCurrentPosition(p=>{setLat(String(p.coords.latitude));setLng(String(p.coords.longitude));setLocating(false);toast.success('Location filled. Check that it matches your selling place.')},()=>{setLocating(false);toast.error('Could not access location. Enter coordinates instead.')},{timeout:15000,maximumAge:0,enableHighAccuracy:true})}
-return <form className="form-grid" onSubmit={async e=>{e.preventDefault();if(!gender){toast.error('Please select your gender.');return}const form=e.currentTarget;const fields=new FormData(form);if(Number(fields.get('age'))<18){toast.error('Seller applicants must be at least 18.');return}fields.set('gender',gender);if(await save(fields,'Verification details submitted for review')){form.reset();setGender('')}}}>
+return <form className="form-grid" onSubmit={async e=>{e.preventDefault();if(!gender){toast.error('Please select your gender.');return}const form=e.currentTarget;const fields=new FormData(form);if(Number(fields.get('age'))<18){toast.error('Seller applicants must be at least 18.');return}fields.set('gender',gender);if(await save(fields,'Verification details submitted for review')){form.reset();setGender('');setUploadKey(key=>key+1)}}}>
 <div className="full verification-section"><h3>1. Personal details</h3><p>Use the name shown on your NID. These details are not displayed on your public seller profile.</p></div>
 <label className="field">Full name<input name="legalName" required maxLength={120} autoComplete="name"/></label>
 <label className="field">Age<input name="age" type="number" required min="18" max="120" step="1" placeholder="Age in years"/></label>
 <label className="field">Gender<Select value={gender} onValueChange={setGender} required><SelectTrigger className="w-full" aria-label="Gender"><SelectValue placeholder="Select gender"/></SelectTrigger><SelectContent>{['Female','Male','Other','Prefer not to say'].map(g=><SelectItem key={g} value={g}>{g}</SelectItem>)}</SelectContent></Select></label>
 <label className="field">Personal email<input name="personalEmail" type="email" required maxLength={254} autoComplete="email"/></label>
 <label className="field">Personal phone number<input name="personalPhone" type="tel" required maxLength={30} autoComplete="tel" placeholder="e.g. +880 1XXXXXXXXX"/></label>
-<label className="field">Passport-size photo<input className="upload" name="passport" type="file" accept="image/jpeg,image/png" required/><small>A clear, recent head-and-shoulders photo. JPEG or PNG, up to 5 MB.</small></label>
+<ImageUpload key={'passport-'+uploadKey} name="passport" label="Passport-size photo" help="A clear, recent head-and-shoulders photo. JPEG or PNG, up to 5 MB." required/>
 <div className="full"><label className="field">Home address<textarea name="homeAddress" required maxLength={700} autoComplete="street-address" placeholder="House, road, area, city or district and postal code"/></label></div>
 <div className="full verification-section"><h3>2. National identity document</h3><p>The reviewer will compare your NID details with your name and photo.</p></div>
 <label className="field">NID number<input name="nidNumber" type="text" inputMode="numeric" required maxLength={30} autoComplete="off" placeholder="Enter the number shown on your NID"/><small>Enter digits only. Leading zeros are preserved.</small></label>
-<label className="field">NID photo<input className="upload" name="identity" type="file" accept="image/jpeg,image/png" required/><small>A clear photo showing your name, face and NID number. JPEG or PNG, up to 5 MB.</small></label>
+<ImageUpload key={'identity-'+uploadKey} name="identity" label="NID photo" help="A clear photo showing your name, face and NID number. JPEG or PNG, up to 5 MB." required/>
 <div className="full verification-section"><h3>3. Your food-selling place</h3><p>Show your actual food cart, stall, shop or kitchen and tell us where it is located.</p></div>
-<label className="field">Food cart or selling-place photo<input className="upload" name="selling" type="file" accept="image/jpeg,image/png" required/><small>Show your setup and food clearly, with a handwritten note showing today’s date. Up to 5 MB.</small></label>
+<ImageUpload key={'selling-'+uploadKey} name="selling" label="Food cart or selling-place photo" help="Show your setup and food clearly, with a handwritten note showing today's date. Up to 5 MB." required/>
 <label className="field">Selling-place address<input name="placeAddress" required maxLength={500} defaultValue={seller.place_label} placeholder="Street, nearby landmark and area"/></label>
 <label className="field">Selling-place latitude<input name="placeLat" type="number" step="any" min="-90" max="90" required value={lat} onChange={e=>setLat(e.target.value)}/></label>
 <label className="field">Selling-place longitude<input name="placeLng" type="number" step="any" min="-180" max="180" required value={lng} onChange={e=>setLng(e.target.value)}/></label>

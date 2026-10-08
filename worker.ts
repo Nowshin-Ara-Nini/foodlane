@@ -1,5 +1,5 @@
 import handler from 'vinext/server/fetch-handler';
-import { cleanupVerificationFiles } from './lib/verification-retention';
+import { cleanupVerificationFiles, cleanupAccountDeletions } from './lib/verification-retention';
 import type { PrivateEnvironment } from './lib/private-verification';
 import type { AuthEnvironment } from './lib/auth';
 import { rateLimit, RateLimitError } from './lib/api-security';
@@ -26,9 +26,10 @@ const worker = {
     }
     return new Response(response.body,{status:response.status,statusText:response.statusText,headers});
   },
-  async scheduled(_event: ScheduledController, env: PrivateEnvironment, ctx: ExecutionContext) {
+  async scheduled(_event: ScheduledController, env: PrivateEnvironment & AuthEnvironment, ctx: ExecutionContext) {
     ctx.waitUntil((async () => {
       const now=Date.now();
+      await env.DB.prepare("INSERT INTO cleanup_health(id,started_at) VALUES('cleanup',?) ON CONFLICT(id) DO UPDATE SET started_at=excluded.started_at").bind(now).run();
       await env.DB.batch([
         env.DB.prepare('DELETE FROM auth_sessions WHERE expires_at<=?').bind(now),
         env.DB.prepare('DELETE FROM auth_verifications WHERE expires_at<=?').bind(now),
@@ -38,12 +39,23 @@ const worker = {
         env.DB.prepare('DELETE FROM admin_mfa_sessions WHERE expires_at<=?').bind(now),
         env.DB.prepare('DELETE FROM admin_mfa WHERE enabled=0 AND setup_expires<=?').bind(now),
       ]);
-      // Bounded batches. Any backlog remains durable for the next daily run.
+      const accounts=await cleanupAccountDeletions(env);
+      let failed=accounts.pending;
+      // Bounded batches. Any backlog remains durable for the next scheduled run.
       for (let i = 0; i < 20; i++) {
         const result = await cleanupVerificationFiles(env);
+        failed+=result.failed;
         if (result.scanned < 100) break;
       }
-    })().catch(()=>{console.error('SCHEDULED_CLEANUP_FAILED');}));
+      const counts=await env.DB.prepare("SELECT (SELECT COUNT(*) FROM account_deletion_jobs) accounts,(SELECT COUNT(*) FROM verification_files WHERE object_key IS NOT NULL AND delete_after IS NOT NULL) files").first<{accounts:number;files:number}>();
+      await env.DB.prepare("UPDATE cleanup_health SET completed_at=?,accounts_pending=?,files_pending=? WHERE id='cleanup'").bind(Date.now(),counts?.accounts??0,counts?.files??0).run();
+      console.log('CLEANUP_COUNTS',JSON.stringify({accountsPending:counts?.accounts??0,filesPending:counts?.files??0,failed}));
+      if(failed)throw new Error('Cleanup requires retry.');
+    })().catch(async()=>{
+      console.error('SCHEDULED_CLEANUP_FAILED');
+      await env.DB.prepare("UPDATE cleanup_health SET failed_at=? WHERE id='cleanup'").bind(Date.now()).run();
+      throw new Error('Scheduled cleanup failed.');
+    }));
   },
 };
 export default worker;

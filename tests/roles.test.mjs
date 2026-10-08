@@ -65,7 +65,7 @@ async function submission(id, seller, age = 25) {
 before(async () => {
   await mkdir('.wrangler/role-tests', { recursive: true });
   await build({ entryPoints: ['tests/auth-worker.ts'], bundle: true, outfile: '.wrangler/role-tests/worker.mjs', format: 'esm', platform: 'neutral', conditions: ['workerd','worker','browser'], mainFields: ['module','main'], external: ['node:*'], define: { 'process.env.NODE_ENV': '"test"' } });
-  mf = new Miniflare({ modules: true, scriptPath: '.wrangler/role-tests/worker.mjs', compatibilityDate: '2026-05-15', compatibilityFlags: ['nodejs_compat'], d1Databases: ['DB'], r2Buckets: ['BUCKET','PRIVATE_VERIFICATIONS'], images: {binding:'IMAGES'}, bindings: { NID_ENCRYPTION_KEYS: JSON.stringify({v1:Buffer.alloc(32,7).toString('base64')}), AUTH_BASE_URL: origin, BETTER_AUTH_SECRET: 'test-only-secret-with-more-than-thirty-two-characters', RESEND_API_KEY: 'fake', AUTH_EMAIL_FROM: 'test@foodlane.test' } });
+  mf = new Miniflare({ modules: true, scriptPath: '.wrangler/role-tests/worker.mjs', compatibilityDate: '2026-05-15', compatibilityFlags: ['nodejs_compat'], d1Databases: ['DB'], r2Buckets: ['BUCKET','PRIVATE_VERIFICATIONS'], images: {binding:'IMAGES'}, bindings: { TEST_ONLY_BETTER_AUTH:'true', NID_ENCRYPTION_KEYS: JSON.stringify({v1:Buffer.alloc(32,7).toString('base64')}), AUTH_BASE_URL: origin, BETTER_AUTH_SECRET: 'test-only-secret-with-more-than-thirty-two-characters', RESEND_API_KEY: 'fake', AUTH_EMAIL_FROM: 'test@foodlane.test' } });
   db = await mf.getD1Database('DB'); bucket = await mf.getR2Bucket('BUCKET'); privateBucket = await mf.getR2Bucket('PRIVATE_VERIFICATIONS');
   for (const file of (await readdir('drizzle')).filter(f => f.endsWith('.sql')).sort()) {
     if (file.startsWith('0005_')) {
@@ -190,19 +190,46 @@ test('age evidence cannot be overridden; only admin decisions update pending sel
   assert.equal((await request('/api/admin/decision',admin.cookie,{id:'adult-verification',status:'rejected',note:'Again',eligibility:'adult'})).status,409);
 });
 
-test('signup cannot set admin; authenticated onboarding chooses buyer/seller only once', async () => {
+test('signup cannot set admin; onboarding collects buyer mobile and chooses role only once', async () => {
   for (const fields of [{role:'admin'},{roleChosen:true},{signupRole:'admin'}]) {
     assert.equal((await request('/api/auth/sign-up/email','',{name:'Attack',email:'attack@example.com',password:'A strong test password 42',...fields})).status,400);
   }
   const onboarding = await account('onboarding');
-  // Emulate the DB state of a newly verified Google user, without bypassing sessions.
   await db.prepare('UPDATE auth_users SET role_chosen=0 WHERE id=?').bind(onboarding.id).run();
   assert.equal((await request('/api/buyer/interests',onboarding.cookie)).status,403);
-  assert.equal((await request('/api/account/role',onboarding.cookie,{role:'admin'})).status,400);
-  const results = await Promise.all([request('/api/account/role',onboarding.cookie,{role:'seller'}),request('/api/account/role',onboarding.cookie,{role:'buyer'})]);
+  const adminForm=new FormData();adminForm.set('role','admin');adminForm.set('name','Onboarding Name');
+  assert.equal((await request('/api/account/role',onboarding.cookie,adminForm)).status,400);
+  const roleForm=(role,phone)=>{const form=new FormData();form.set('role',role);form.set('name','Foodlane Name');form.set('phone',phone);form.set('useGooglePhoto','true');return form;};
+  const results = await Promise.all([request('/api/account/role',onboarding.cookie,roleForm('seller','')),request('/api/account/role',onboarding.cookie,roleForm('buyer','+880 1712 345678'))]);
   assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
-  assert.equal((await request('/api/account/role',buyer.cookie,{role:'seller'})).status,409);
-  assert.equal((await request('/api/account/role','',{role:'seller'})).status,401);
+  const chosen=await db.prepare('SELECT name,role,phone FROM auth_users WHERE id=?').bind(onboarding.id).first();
+  assert.equal(chosen.name,'Foodlane Name');assert.ok(['buyer','seller'].includes(chosen.role));
+  if(chosen.role==='buyer')assert.equal(chosen.phone,'+880 1712 345678');else assert.equal(chosen.phone,null);
+  const profileForm=new FormData();profileForm.set('role','buyer');profileForm.set('name','Buyer profile');profileForm.set('phone','+8801712345678');
+  assert.equal((await request('/api/account/role',onboarding.cookie,profileForm)).status,409);
+  const tooShort=new FormData();tooShort.set('role','buyer');tooShort.set('name','Valid Name');tooShort.set('phone','123');
+  const another=await account('onboardmissing');await db.prepare('UPDATE auth_users SET role_chosen=0 WHERE id=?').bind(another.id).run();
+  assert.equal((await request('/api/account/role',another.cookie,tooShort)).status,400);
+  assert.equal((await request('/api/account/role',buyer.cookie,roleForm('seller',''))).status,409);
+  assert.equal((await request('/api/account/role','',roleForm('seller',''))).status,401);
+});
+
+test('account profile updates name and phone and stores replaceable private photos',async()=>{
+  const a=await account('profileedit');
+  const update=new FormData();update.set('name','Updated Buyer');update.set('phone','+880 1712 345678');
+  assert.equal((await request('/api/account/profile',a.cookie,update)).status,200);
+  let me=await (await request('/api/account/me',a.cookie)).json();assert.equal(me.user.name,'Updated Buyer');assert.equal(me.user.phone,'+880 1712 345678');
+  const upload=async()=>{const data=new FormData();data.set('name','Updated Buyer');data.set('phone','+880 1712 345678');data.set('profilePhoto',new File([fixture],'profile.png',{type:'image/png'}));return request('/api/account/profile',a.cookie,data);};
+  assert.equal((await upload()).status,200);
+  me=await (await request('/api/account/me',a.cookie)).json();assert.equal(me.user.image,'/api/account/profile-photo');
+  const key=(await db.prepare('SELECT image FROM auth_users WHERE id=?').bind(a.id).first()).image;assert.ok(key.startsWith('profile/'+a.id+'/'));
+  assert.equal((await request('/api/account/profile-photo',a.cookie)).status,200);
+  const firstKey=key;assert.equal((await upload()).status,200);
+  assert.equal((await db.prepare("SELECT kind FROM verification_files WHERE object_key=?").bind(firstKey).first()).kind,'account-delete');
+  const remove=new FormData();remove.set('name','Updated Buyer');remove.set('phone','+880 1712 345678');remove.set('removePhoto','true');
+  assert.equal((await request('/api/account/profile',a.cookie,remove)).status,200);
+  assert.equal((await db.prepare('SELECT image FROM auth_users WHERE id=?').bind(a.id).first()).image,null);
+  assert.equal((await request('/api/account/profile-photo',a.cookie)).status,404);
 });
 
 test('current DB role overrides stale sessions and forged role headers; mutations require origin', async () => {
@@ -525,40 +552,31 @@ test('near-me exact distance filtering precedes pagination, handles antimeridian
 });
 
 
-async function deletionCode(a){
-  const r=await request('/api/account/deletion-code',a.cookie,{});assert.equal(r.status,200,await r.clone().text());
-  const messages=await (await mf.dispatchFetch(origin+'/test/mail')).json();
-  const code=messages.at(-1).text.split('\n')[1];assert.match(code,/^[a-f0-9]{32}$/);return code;
-}
-test('deletion requires expiring single-use email reauthentication bound to the user and session',async()=>{
-  const a=await account('deleteconfirmed'),b=await account('deleteother');const code=await deletionCode(a);
-  const stored=await db.prepare('SELECT digest FROM deletion_challenges WHERE user_id=?').bind(a.id).first();assert.notEqual(stored.digest,code);
-  assert.equal((await request('/api/account/delete',b.cookie,{code,confirmation:'DELETE'})).status,403);
-  const secondCookie=await loginAgain('deleteconfirmed');assert.equal((await request('/api/account/delete',secondCookie,{code,confirmation:'DELETE'})).status,403);
-  assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'},{Origin:'https://evil.test'})).status,403);
-  assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'no'})).status,400);
-  const race=await Promise.all([request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'}),request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'})]);
-  assert.equal(race.filter(r=>r.status===200).length,1);assert.ok(race.some(r=>[401,403].includes(r.status)));
-  const success=race.find(r=>r.status===200);assert.equal((await success.json()).filesPending,0);assert.match(success.headers.get('set-cookie'),/Max-Age=0/);
-  assert.equal((await request('/api/account/me',secondCookie)).status,401);assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'})).status,401);
-  for(const table of ['auth_users','auth_accounts','auth_sessions','deletion_challenges']){const column=table==='auth_users'?'id':'user_id';assert.equal((await db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE ${column}=?`).bind(a.id).first()).n,0);}
-  const events=await db.prepare("SELECT subject,action FROM audit_log WHERE subject=?").bind(a.id).all();assert.deepEqual(events.results,[{subject:a.id,action:'account_deleted'}]);
+test('account deletion uses the active session and typed confirmation without email, and stores only an anonymous reason',async()=>{
+  const a=await account('deleteconfirmed');
+  assert.equal((await request('/api/account/delete',a.cookie,{confirmation:'no'})).status,400);
+  assert.equal((await request('/api/account/delete',a.cookie,{confirmation:'DELETE'},{Origin:'https://evil.test'})).status,403);
+  const success=await request('/api/account/delete',a.cookie,{confirmation:'DELETE',reason:'privacy'});
+  assert.equal(success.status,200,await success.clone().text());assert.equal((await success.json()).filesPending,0);assert.match(success.headers.get('set-cookie'),/Max-Age=0/);
+  assert.equal((await request('/api/account/me',a.cookie)).status,401);
+  for(const table of ['auth_users','auth_accounts','auth_sessions','deletion_challenges']){const column=table==='auth_users'?'id':'user_id';assert.equal((await db.prepare('SELECT COUNT(*) n FROM '+table+' WHERE '+column+'=?').bind(a.id).first()).n,0);}
+  const feedback=await db.prepare('SELECT reason FROM account_deletion_feedback').first();assert.deepEqual(feedback,{reason:'privacy'});
+  const events=await db.prepare("SELECT subject,action FROM audit_log WHERE subject=?").bind(a.id).all();assert.deepEqual(events.results,[{subject:a.id,action:'account_deletion_requested'},{subject:a.id,action:'account_deleted'}]);
 });
-test('expired deletion codes and excessive guesses fail; OAuth accounts use the same email proof and admins also require MFA',async()=>{
-  const a=await account('deleteexpiry');const code=await deletionCode(a);await db.prepare('UPDATE deletion_challenges SET expires_at=0 WHERE user_id=?').bind(a.id).run();
-  assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'})).status,403);
-  for(let i=0;i<4;i++)assert.equal((await request('/api/account/delete',a.cookie,{code:'0'.repeat(32),confirmation:'DELETE'})).status,403);
-  assert.equal((await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'})).status,429);
-  const google=await account('deletegoogle');await db.prepare("UPDATE auth_accounts SET provider_id='google',password=NULL WHERE user_id=?").bind(google.id).run();const oauthCode=await deletionCode(google);
-  assert.equal((await request('/api/account/delete',google.cookie,{code:oauthCode,confirmation:'DELETE'})).status,200);
-  const adminDelete=await newAdmin('deletemfa');assert.equal((await request('/api/account/deletion-code',adminDelete.cookie,{})).status,403);await enroll(adminDelete);const adminCode=await deletionCode(adminDelete);
-  assert.equal((await request('/api/account/delete',adminDelete.cookie,{code:adminCode,confirmation:'DELETE'})).status,200);
+test('Google users can delete without email and administrators still need MFA',async()=>{
+  const google=await account('deletegoogle');await db.prepare("UPDATE auth_accounts SET provider_id='google',password=NULL WHERE user_id=?").bind(google.id).run();
+  assert.equal((await request('/api/account/delete',google.cookie,{confirmation:'DELETE'})).status,200);
+  const adminDelete=await newAdmin('deletemfa');
+  assert.equal((await request('/api/account/delete',adminDelete.cookie,{confirmation:'DELETE'})).status,403);
+  await enroll(adminDelete);
+  assert.equal((await request('/api/account/delete',adminDelete.cookie,{confirmation:'DELETE'})).status,200);
 });
+
 test('public account deletion truthfully returns pending jobs and retries erase every private/public derivative',async()=>{
   const a=await applicant('deletepending');const id=await submit(a,fieldsFor({portrait:true}));await decision(id);
   assert.equal((await request('/api/buyer/report',buyer.cookie,{sellerId:a.seller,reason:'A test report containing private text'})).status,200);
   const files=(await db.prepare('SELECT object_key,bucket FROM verification_files WHERE subject=?').bind(a.seller).all()).results;
-  const code=await deletionCode(a);const r=await request('/api/account/delete',a.cookie,{code,confirmation:'DELETE'},{'x-test-fail-storage':'1'});assert.equal(r.status,202);const result=await r.json();assert.equal(result.dataDeleted,true);assert.equal(result.filesPending,3);
+  const r=await request('/api/account/delete',a.cookie,{confirmation:'DELETE',reason:'other'},{'x-test-fail-storage':'1'});assert.equal(r.status,202);const result=await r.json();assert.equal(result.dataDeleted,true);assert.equal(result.filesPending,3);
   assert.equal((await request(`/api/public/sellers/${a.seller}`)).status,404);assert.equal((await request(`/api/admin/verifications/${id}/documents/passport`,admin.cookie)).status,404);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM seller_reports WHERE seller_id=?').bind(a.seller).first()).n,0);
   await cleanup(new Date(Date.now()+120000).toISOString());for(const f of files)assert.equal(await (f.bucket==='private'?privateBucket:bucket).get(f.object_key),null);
@@ -615,4 +633,136 @@ test('account deletion racing a cleanup batch leaves no stale file-job record af
   await db.prepare("INSERT INTO verification_files(id,subject,kind,bucket,object_key,state,created_at,delete_after) VALUES(?,'opaque-subject','nid','private',?,'attached','2019-01-01','2019-01-02')").bind(id,key).run();
   const r=await mf.dispatchFetch(origin+'/test/cleanup',{method:'POST',body:JSON.stringify({now:'2020-01-01T00:00:00.000Z',accountDeleteRace:true})});assert.equal(r.status,200);assert.equal((await r.json()).deleted,1);
   assert.equal(await privateBucket.get(key),null);assert.equal(await db.prepare('SELECT id FROM verification_files WHERE id=?').bind(id).first(),null);
+});
+
+test('recommendations persist once per customer, remain separate from reviews and interest, and enforce access',async()=>{
+  const owner=await account('recommendowner','seller'), first=await account('recommendfirst'), second=await account('recommendsecond');
+  const sid='recommend-shop';
+  await seedSeller(owner,sid,'verified');
+  const payload={sellerId:sid,recommended:true};
+  for(const cookie of ['',owner.cookie,admin.cookie]){
+    assert.equal((await request('/api/buyer/recommendation',cookie,payload)).status,403);
+    assert.equal((await request('/api/buyer/feedback/'+sid,cookie)).status,403);
+  }
+  assert.equal((await request('/api/buyer/recommendation',first.cookie,{...payload,userId:second.id})).status,400);
+  assert.equal((await request('/api/buyer/recommendation',first.cookie,{...payload,recommended:'true'})).status,400);
+  assert.equal((await request('/api/buyer/recommendation',first.cookie,payload,{Origin:'https://evil.test'})).status,403);
+  const race=await Promise.all(Array.from({length:8},()=>request('/api/buyer/recommendation',first.cookie,payload)));
+  assert.ok(race.every(response=>response.status===200));
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM seller_recommendations WHERE seller_id=?').bind(sid).first()).n,1);
+  assert.equal((await request('/api/buyer/recommendation',second.cookie,payload)).status,200);
+  const details=async()=> (await (await request('/api/public/sellers/'+sid)).json()).seller;
+  assert.equal((await details()).recommendation_count,2);
+  assert.equal((await details()).interest_count,0);
+  assert.equal((await details()).review_count,0);
+  assert.equal((await request('/api/buyer/interest',first.cookie,{sellerId:sid})).status,200);
+  assert.equal((await request('/api/buyer/review',first.cookie,{sellerId:sid,rating:5,body:'Delicious food, served fresh.'})).status,200);
+  assert.equal((await request('/api/buyer/review/edit',first.cookie,{sellerId:sid,rating:4,body:'Fresh food and a friendly seller.'})).status,200);
+  const feedback=await (await request('/api/buyer/feedback/'+sid,first.cookie)).json();
+  assert.equal(feedback.recommended,true);assert.equal(feedback.review.rating,4);
+  assert.equal((await (await request('/api/buyer/feedback/'+sid,second.cookie)).json()).review,null);
+  const catalogue=await (await request('/api/public/catalogue')).json();
+  const food=catalogue.foods.find(food=>food.seller_id===sid);
+  assert.equal(food.recommendation_count,2);assert.equal(food.review_count,1);assert.equal(food.interest_count,1);
+  const directory=await (await request('/api/public/sellers?search=recommend-shop')).json();
+  assert.equal(directory.sellers[0].recommendation_count,2);
+  assert.equal((await request('/api/buyer/recommendation',first.cookie,{sellerId:sid,recommended:false})).status,200);
+  assert.equal((await details()).recommendation_count,1);
+  assert.equal((await details()).interest_count,1);assert.equal((await details()).review_count,1);
+  assert.equal((await (await request('/api/buyer/feedback/'+sid,first.cookie)).json()).recommended,false);
+  assert.equal((await (await request('/api/buyer/feedback/'+sid,second.cookie)).json()).recommended,true);
+  await db.prepare("UPDATE sellers SET status='pending' WHERE id=?").bind(sid).run();
+  assert.equal((await request('/api/buyer/recommendation',first.cookie,payload)).status,404);
+  assert.equal((await request('/api/buyer/feedback/'+sid,first.cookie)).status,404);
+  await db.prepare("UPDATE sellers SET status='verified' WHERE id=?").bind(sid).run();
+  await db.prepare("INSERT INTO seller_suspensions(seller_id,reason,created) VALUES(?,'Under review','2026-01-01')").bind(sid).run();
+  assert.equal((await request('/api/buyer/recommendation',first.cookie,payload)).status,404);
+  assert.equal((await request('/api/buyer/feedback/'+sid,first.cookie)).status,404);
+  assert.equal((await request('/api/public/sellers/'+sid)).status,404);
+  await db.prepare('DELETE FROM seller_suspensions WHERE seller_id=?').bind(sid).run();
+  // A role change must not let an owner recommend their own shop.
+  await db.prepare("UPDATE auth_users SET role='buyer' WHERE id=?").bind(owner.id).run();
+  assert.equal((await request('/api/buyer/recommendation',owner.cookie,payload)).status,404);
+  await mf.dispatchFetch(origin+'/test/delete-account',{method:'POST',body:JSON.stringify({userId:second.id})});
+  assert.equal((await details()).recommendation_count,0);
+  assert.equal((await request('/api/buyer/recommendation',first.cookie,payload)).status,200);
+  const deletedOwner=await mf.dispatchFetch(origin+'/test/delete-account',{method:'POST',body:JSON.stringify({userId:owner.id})});
+  assert.equal(deletedOwner.status,200);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM seller_recommendations WHERE seller_id=?').bind(sid).first()).n,0);
+});
+
+test('named location search matches road, neighborhood, city and district without requiring coordinates',async()=>{
+  const a=await account('locationgulshan','seller'), b=await account('locationother','seller'), c=await account('locationpending','seller');
+  await seedSeller(a,'location-gulshan','verified');await seedSeller(b,'location-other','verified');await seedSeller(c,'location-pending','pending');
+  await db.prepare("UPDATE sellers SET address='Road 12, Gulshan 1, Dhaka',name='Real kitchen' WHERE id='location-gulshan'").run();
+  await db.prepare("UPDATE sellers SET address='Road 5, Agrabad, Chattogram',name='Gulshan 1 Dhaka' WHERE id='location-other'").run();
+  await db.prepare("UPDATE sellers SET address='Road 12, Gulshan 1, Dhaka' WHERE id='location-pending'").run();
+  const find=async location=>{
+    const response=await request('/api/public/sellers?'+new URLSearchParams({location}));
+    assert.equal(response.status,200,await response.clone().text());return response.json();
+  };
+  const exact=await find('Road 12, Gulshan 1, Dhaka');
+  assert.deepEqual(exact.sellers.map(s=>s.id),['location-gulshan']);assert.equal(exact.total,1);
+  assert.equal(exact.sellers[0].distance_km,undefined);
+  assert.deepEqual((await find('gulshan 1, dhaka')).sellers.map(s=>s.id),['location-gulshan']);
+  assert.ok((await find('Chattogram')).sellers.some(s=>s.id==='location-other'));
+  assert.equal((await find('Road 99, Gulshan 1, Dhaka')).total,0);
+  assert.equal((await find("' OR 1=1 --")).total,0);
+  assert.equal((await request('/api/public/sellers?location='+encodeURIComponent('x'.repeat(401)))).status,400);
+  assert.equal((await request('/api/public/sellers?location='+encodeURIComponent(', ,'))).status,400);
+  assert.equal((await request('/api/public/sellers?location=Dhaka&location=Gulshan')).status,400);
+  await db.prepare("INSERT INTO seller_suspensions VALUES('location-gulshan','Under review','2026-01-01')").run();
+  assert.equal((await find('Gulshan 1, Dhaka')).total,0);
+});
+
+
+test('admin account moderation requires MFA, protects admins, revokes buyers and hides sellers',async()=>{
+  const target=await account('moderatedseller','seller');await seedSeller(target,'moderated-shop','verified');
+  const decision={userId:target.id,action:'ban',reason:'Repeated violation of Foodlane rules'};
+  assert.equal((await request('/api/admin/accounts',buyer.cookie)).status,403);
+  assert.equal((await request('/api/admin/accounts/decision',buyer.cookie,decision)).status,403);
+  const locked=await newAdmin('moderatorlocked');
+  assert.equal((await request('/api/admin/accounts/decision',locked.cookie,decision)).status,403);
+  assert.equal((await request('/api/admin/accounts/decision',admin.cookie,{...decision,userId:admin.id})).status,400);
+  assert.equal((await request('/api/admin/accounts/decision',admin.cookie,{...decision,userId:locked.id})).status,404);
+  assert.equal((await request('/api/admin/accounts/decision',admin.cookie,decision)).status,200);
+  assert.equal((await request('/api/account/me',target.cookie)).status,401);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM auth_sessions WHERE user_id=?').bind(target.id).first()).n,0);
+  assert.equal((await db.prepare('SELECT status FROM sellers WHERE id=?').bind('moderated-shop').first()).status,'suspended');
+  const hidden=await (await request('/api/public/catalogue?search=moderated-shop')).json();assert.equal(hidden.total,0);
+  const directory=await (await request('/api/admin/accounts?search=moderatedseller&status=banned',admin.cookie)).json();
+  assert.equal(directory.accounts.length,1);assert.equal(directory.accounts[0].id,target.id);
+  assert.equal((await request('/api/admin/accounts/decision',admin.cookie,{...decision,action:'unban'})).status,200);
+  assert.equal((await db.prepare('SELECT status FROM sellers WHERE id=?').bind('moderated-shop').first()).status,'pending');
+  assert.equal((await request('/api/account/me',target.cookie)).status,401);
+  assert.equal((await request('/api/admin/accounts/decision',admin.cookie,{...decision,action:'delete',confirmation:'DELETE wrong'})).status,400);
+  const deleted=await request('/api/admin/accounts/decision',admin.cookie,{...decision,action:'delete',confirmation:'DELETE '+target.id});
+  assert.equal(deleted.status,200,await deleted.clone().text());assert.equal((await deleted.json()).dataDeleted,true);
+  assert.equal(await db.prepare('SELECT id FROM auth_users WHERE id=?').bind(target.id).first(),null);
+  const logs=await db.prepare('SELECT action,admin_ref FROM audit_log WHERE subject=? ORDER BY rowid').bind(target.id).all();
+  assert.ok(logs.results.some(row=>row.action==='account_banned'&&row.admin_ref===admin.id));
+  assert.equal((await request('/api/admin/cleanup',admin.cookie)).status,200);
+});
+
+test('catalogue searches and ranks all dishes before bounded pagination, and offers persist',async()=>{
+  const target=await account('cataloguebulk','seller');await seedSeller(target,'catalogue-bulk','verified');
+  const inserts=[];for(let i=0;i<205;i++)inserts.push(db.prepare('INSERT INTO foods VALUES(?,?,?,?,?,?,?,?)').bind('bulk-'+String(i).padStart(3,'0'),'catalogue-bulk',i===0?'Old hidden noodle':'Bulk dish '+i,'Fresh',100,'Noodles','',1));await db.batch(inserts);
+  const old=await request('/api/public/catalogue?search=Old%20hidden%20noodle');assert.equal(old.status,200,await old.clone().text());assert.equal((await old.json()).foods[0].id,'bulk-000');
+  const first=await (await request('/api/public/catalogue?search=Bulk&limit=20')).json();assert.equal(first.foods.length,20);assert.equal(first.hasMore,true);assert.ok(first.total>=205);
+  const second=await (await request('/api/public/catalogue?search=Bulk&limit=20&page=2')).json();assert.equal(second.foods.length,20);assert.ok(!first.foods.some(a=>second.foods.some(b=>a.id===b.id)));
+  const offer=await request('/api/seller/food',target.cookie,{id:'bulk-000',name:'Old hidden noodle',description:'Fresh noodles',price:80,category:'Noodles',image:'/api/seller/photos/11111111-1111-4111-8111-111111111111',available:true,originalPrice:100,offerLabel:'Lunch offer'});
+  assert.equal(offer.status,200,await offer.clone().text());
+  const offers=await request('/api/public/catalogue?collection=offers&search=Old');assert.equal(offers.status,200,await offers.clone().text());const discounted=(await offers.json()).foods[0];assert.equal(discounted.original_price,100);assert.equal(discounted.price,80);assert.equal(discounted.offer_label,'Lunch offer');
+});
+
+
+test('provider and database deletion failures keep a durable disabled account and recover on retry',async()=>{
+  for(const fault of ['provider','database']){
+    const target=await account('deletionfault'+fault);
+    const response=await request('/test/provider-delete','',{userId:target.id,fail:fault==='provider',localFail:fault==='database'});assert.equal(response.status,200,await response.clone().text());assert.equal((await response.json()).deletionPending,true);
+    const job=await db.prepare('SELECT provider_deleted,attempts,last_error FROM account_deletion_jobs WHERE user_id=?').bind(target.id).first();assert.equal(job.provider_deleted,fault==='provider'?0:1);assert.equal(job.attempts,1);assert.equal(job.last_error,'deletion-unavailable');
+    assert.equal((await db.prepare('SELECT account_status FROM auth_users WHERE id=?').bind(target.id).first()).account_status,'deleting');assert.equal((await request('/api/account/me',target.cookie)).status,401);
+    await db.prepare('UPDATE account_deletion_jobs SET next_attempt_at=0 WHERE user_id=?').bind(target.id).run();
+    const retry=await request('/test/provider-delete','',{userId:target.id,retry:true});assert.equal((await retry.json()).completed,1);assert.equal(await db.prepare('SELECT id FROM auth_users WHERE id=?').bind(target.id).first(),null);assert.equal(await db.prepare('SELECT user_id FROM account_deletion_jobs WHERE user_id=?').bind(target.id).first(),null);
+  }
 });

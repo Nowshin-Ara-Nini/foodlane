@@ -1,28 +1,29 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "foodlane",
+  "account_id": "712ae5c7f97bc3749d1d9f034a36ed3e",
   "main": "worker.ts",
   "compatibility_date": "2026-05-15",
   "compatibility_flags": ["nodejs_compat"],
-  // Deliberately not publicly routable during the six implementation checkpoints.
-  "workers_dev": false,
+  // Publish the app at the configured workers.dev URL.
+  "workers_dev": true,
   "preview_urls": false,
   // Avoid automatic URL/header traces containing authentication links or private route references.
-  "observability": { "enabled": false },
+  "observability": { "enabled": true },
   "d1_databases": [{
     "binding": "DB",
     "database_name": "foodlane",
-    "database_id": "00000000-0000-4000-8000-000000000000",
+    "database_id": "b614e824-94ac-4b70-b2b2-a09fa442115c",
     "migrations_dir": "drizzle"
   }],
   "r2_buckets": [
-    { "binding": "BUCKET", "bucket_name": "foodlane-media" },
-    { "binding": "PRIVATE_VERIFICATIONS", "bucket_name": "foodlane-private-verifications" }
+    { "binding": "BUCKET", "bucket_name": "foodlane-4589103-bd-media" },
+    { "binding": "PRIVATE_VERIFICATIONS", "bucket_name": "foodlane-private-12405-verifications" }
   ],
   "images": { "binding": "IMAGES" },
-  "triggers": { "crons": ["0 3 * * *"] },
+  "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
-    "AUTH_BASE_URL": "https://foodlane.invalid",
+    "AUTH_BASE_URL": "https://foodlane.nowshinaranini.workers.dev",
     "AUTH_ALLOW_LOCAL_HTTP": "false",
     "VERIFICATION_RETENTION_ENABLED": "true",
     "VERIFICATION_RETENTION_DAYS": "30",

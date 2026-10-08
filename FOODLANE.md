@@ -1,4 +1,4 @@
-﻿# Foodlane upgrade
+# Foodlane upgrade
 
 ## Approval checkpoints
 
@@ -9,7 +9,7 @@ Implement one step at a time. After each, report changes, checks, limitations an
 3. Private verification, consent, image sanitization and retention: implemented locally; approved to proceed to step 4.
 4. Admin review, mandatory MFA and audit panel: implemented locally; approved to proceed to step 5.
 5. Maps, near-me, seller-level interest/reviews: implemented locally; approved to proceed to step 6.
-6. Abuse protection, account deletion and privacy policy: implemented locally; final approval checkpoint, with deployment checks still outstanding.
+6. Abuse protection, account deletion and privacy policy: implemented and locally revalidated on 2026-10-03 at the owner's request; deployment checks remain outstanding.
 
 ## Step 1 implementation
 
@@ -177,6 +177,24 @@ Account deletion is available at `/account`. A 128-bit, single-use confirmation 
 
 Persistent API, upload, report and deletion limits, bounded inputs, exact-origin CSRF checks, HTTPS/security headers, scheduled expiry cleanup and generic operational logging are in place. `/privacy` publishes the owner-provided contact `nowshinaranini@gmail.com`, collected data, public/optional consent, processors, retention and deletion details. Legacy UI typing/lint problems were fixed without changing the design.
 
-`0009_abuse_deletion.sql` adds report, suspension and deletion-challenge tables; applied locally only. See [SECURITY_RUNBOOK.md](SECURITY_RUNBOOK.md) for full migrations, checks, acceptance results and remaining deployment gates. All six steps are implemented locally; no remote migration or public activation has occurred. Stop for owner review.
+`0009_abuse_deletion.sql` adds report, suspension and deletion-challenge tables; applied locally and to the fresh remote D1 schema. See [SECURITY_RUNBOOK.md](SECURITY_RUNBOOK.md) for full migrations, checks, acceptance results and remaining deployment gates. All six steps are implemented locally; a fresh remote D1 schema is migrated, and no public application activation has occurred. Remaining deployment gates are in SECURITY_RUNBOOK.md.
 
-Final local checks: 53 tests pass, TypeScript passes, full-project lint passes without warnings, production build passes, and local scheduled cleanup succeeds. Interactive browser journeys, live Google/Resend, remote R2 privacy and deployed hashing CPU remain unverified release gates.
+Latest local checks (2026-10-03): 54 tests pass (52 source/integration/render, one compiled-Worker journey, one Chromium component journey), TypeScript and production build pass, local migrations are current through 0009, and scheduled cleanup succeeds with zero pending jobs. The full lint run found one warning in the benchmark helper; it was corrected and the changed helper/browser test linted separately. Chromium covers Step 6 deletion error recovery/pending cleanup and moderation conflicts with simulated APIs. Full integrated browser journeys, live Google/Resend, and deployed image/cron behavior remain release gates. A protected deployed probe showed default scrypt hash creation passing 25/25 samples but verification passing only 12/25 before 13 CPU resource-limit errors; public auth activation is blocked on the Free plan unless the runtime constraint is resolved. Both real R2 buckets now have disabled r2.dev access and no custom domains, verified through Cloudflare; their actual names are configured in wrangler.jsonc. The fresh remote D1 schema is applied and `nowshinaranini.workers.dev` is registered, but the application origin remains a placeholder and public activation remains disabled.
+
+> **Current auth behavior (October 2026):** The Google-only update below supersedes the earlier Step 1 email/password UI and verification-email details. The app now exposes Google OAuth only, then collects the Foodlane display name, Google profile-photo preference, and one-time buyer/seller choice. New sellers continue through the existing private verification and admin approval flow.
+## Supabase Auth cutover (October 2026)
+
+Because the Free-plan scrypt verification probe hit Worker CPU limits, the active `/api/auth` route now uses Supabase Auth. Foodlane keeps API authorization, role mapping, and opaque D1 sessions on Cloudflare. The browser receives only a random HttpOnly cookie; Supabase access and refresh tokens are stored in D1. Password verification runs at the auth provider. Existing Better Auth password identities are not imported; this cutover assumes fresh accounts.
+
+`drizzle/0010_supabase_auth.sql` adds provider-token fields to D1 sessions. The migration is recorded in Drizzle metadata and was syntax-checked in an isolated SQLite database, but it has not been applied remotely. See [SUPABASE_AUTH_RUNBOOK.md](SUPABASE_AUTH_RUNBOOK.md) for dashboard configuration and migration commands.
+
+The user has created a Supabase project and added the URL and publishable key locally using the `NEXT_PUBLIC_SUPABASE_*` names; the adapter accepts those names server-side. Google provider credentials and callback allow-list configuration are required; Supabase email verification and SMTP are no longer part of sign-in. A Supabase server-only secret key is required for account deletion; that endpoint fails closed without it. The app origin is `https://foodlane.nowshinaranini.workers.dev`.
+
+### Customer feedback and recommendations
+Dish details and public shop pages share the customer feedback panel. Signed-in buyers can publish or edit one review per seller, and separately add or remove one recommendation per seller. Recommendations do not create interest or alter ratings. Guests can read feedback; sample listings show the controls with publishing disabled.
+“Neighbors love these” ranks real shops by recommendation count; “On everyone’s mind” ranks by distinct interested customers. Sellers with no corresponding signal are excluded. These are per-seller counts shared across dishes.
+Migration 0012_spotty_alex_power.sql adds seller_recommendations with a unique seller/customer pair and cascading account/seller cleanup. Applied to the local database only; apply migrations before deploying this version.
+New buyer routes: GET /api/buyer/feedback/:sellerId returns the caller’s review and recommendation; POST /api/buyer/recommendation accepts {sellerId,recommended}. Verified status, suspension, role, ownership and same-origin checks apply. Public catalogue and seller projections return recommendation_count.
+
+### Address search on Explore map
+Explore map now uses Google Maps with road/landmark, neighborhood, city and district fields instead of visible coordinates. Named searches match published seller addresses; Near me retains internal distance calculations. Each result can be selected on the map or opened in Google Maps directions. Seller verification/pin-editing maps retain their existing separate workflow. No new database migration or Maps Platform billing setup was needed.

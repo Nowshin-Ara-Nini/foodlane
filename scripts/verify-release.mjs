@@ -1,0 +1,5 @@
+import {spawnSync} from 'node:child_process';
+const tests=['tests/auth.test.mjs','tests/supabase-auth.test.mjs','tests/roles.test.mjs','tests/image-sanitization.test.mjs','tests/consent-ui.test.mjs','tests/admin-mfa.test.mjs','tests/safety-ui.test.mjs','tests/recommendations.test.mjs','tests/location-search.test.mjs'];
+const checks=[['TypeScript',['node_modules/typescript/bin/tsc','--noEmit']],['Lint',['node_modules/eslint/bin/eslint.js','.','--ignore-pattern','dist','--ignore-pattern','.next']],['Integration tests',['--test',...tests]],['Production build',['scripts/run-framework.mjs','build']],['Built Google/admin flow',['--test','tests/admin-built.test.mjs']],['Browser safety flow',['--test','tests/safety-browser.test.mjs']]];
+for(const [name,args] of checks){console.log('Checking '+name);const result=spawnSync(process.execPath,args,{stdio:'inherit',env:process.env});if(result.error||result.status!==0){console.error(name+' failed. Release checks stopped.');process.exit(result.status||1);}}
+console.log('Local release checks passed. Production migrations, secrets and deployed smoke tests are separate gates.');

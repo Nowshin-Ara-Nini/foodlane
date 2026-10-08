@@ -4,7 +4,7 @@ import { handleFoodlane, type FoodlaneEnvironment } from '../lib/foodlane-api';
 import { handleAuth } from '../lib/auth-handler';
 import { hashPassword, verifyPassword } from 'better-auth/crypto';
 import { encryptNid } from '../lib/nid-crypto';
-import { cleanupVerificationFiles, deleteAccountData } from '../lib/verification-retention';
+import { cleanupVerificationFiles, deleteAccountData, cleanupAccountDeletions } from '../lib/verification-retention';
 import { sanitizeImage } from '../lib/image-sanitization';
 const mail: AuthMail[] = [];
 const worker = {
@@ -30,6 +30,16 @@ const worker = {
       }} as unknown as R2Bucket;
       return Response.json(await cleanupVerificationFiles(data.fail?{...env,PRIVATE_VERIFICATIONS:undefined}:data.accountDeleteRace?{...env,PRIVATE_VERIFICATIONS:racedBucket}:env,data.now));
     }
+    if(path==='/test/provider-delete') {
+      const data=await request.json() as {userId:string;fail?:boolean;retry?:boolean;localFail?:boolean};
+      const originalFetch=globalThis.fetch;
+      globalThis.fetch=async()=>new Response(null,{status:data.fail?503:204});
+      const testEnv={...env,SUPABASE_URL:'https://supabase.test',SUPABASE_PUBLISHABLE_KEY:'sb_publishable_test',SUPABASE_SECRET_KEY:'sb_secret_test'};
+      try {
+        if(data.localFail)await env.DB.exec("CREATE TRIGGER fail_account_delete BEFORE DELETE ON auth_users BEGIN SELECT RAISE(ABORT,'test fault'); END");
+        return Response.json(data.retry?await cleanupAccountDeletions(testEnv):await deleteAccountData(testEnv,data.userId));
+      } finally {globalThis.fetch=originalFetch;if(data.localFail)await env.DB.exec('DROP TRIGGER fail_account_delete');}
+    }
     if (path === '/test/delete-account') {
       const data = await request.json() as {userId:string;fail?:boolean};
       return Response.json(await deleteAccountData(data.fail?{...env,PRIVATE_VERIFICATIONS:undefined}:env,data.userId));
@@ -45,7 +55,7 @@ const worker = {
       return Response.json({ valid: await verifyPassword({ hash, password: 'Benchmark-only password 2026' }) });
     }
     if (path.startsWith('/api/auth/')) return handleAuth(request, env, createAuth(env, async (message) => { mail.push(message); }));
-    return handleFoodlane(request, request.headers.get('x-test-fail-storage')==='1'?{...env,PRIVATE_VERIFICATIONS:undefined}:env, async(message)=>{mail.push(message);});
+    return handleFoodlane(request, request.headers.get('x-test-fail-storage')==='1'?{...env,PRIVATE_VERIFICATIONS:undefined}:env);
   },
 };
 export default worker;
