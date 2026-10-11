@@ -1,5 +1,5 @@
 import handler from 'vinext/server/fetch-handler';
-import { cleanupVerificationFiles, cleanupAccountDeletions } from './lib/verification-retention';
+import { cleanupVerificationFiles, cleanupAccountDeletions, scrubReviewedVerificationDetails } from './lib/verification-retention';
 import type { PrivateEnvironment } from './lib/private-verification';
 import type { AuthEnvironment } from './lib/auth';
 import { rateLimit, RateLimitError } from './lib/api-security';
@@ -39,6 +39,7 @@ const worker = {
         env.DB.prepare('DELETE FROM admin_mfa_sessions WHERE expires_at<=?').bind(now),
         env.DB.prepare('DELETE FROM admin_mfa WHERE enabled=0 AND setup_expires<=?').bind(now),
       ]);
+      const details=await scrubReviewedVerificationDetails(env);
       const accounts=await cleanupAccountDeletions(env);
       let failed=accounts.pending;
       // Bounded batches. Any backlog remains durable for the next scheduled run.
@@ -49,7 +50,7 @@ const worker = {
       }
       const counts=await env.DB.prepare("SELECT (SELECT COUNT(*) FROM account_deletion_jobs) accounts,(SELECT COUNT(*) FROM verification_files WHERE object_key IS NOT NULL AND delete_after IS NOT NULL) files").first<{accounts:number;files:number}>();
       await env.DB.prepare("UPDATE cleanup_health SET completed_at=?,accounts_pending=?,files_pending=? WHERE id='cleanup'").bind(Date.now(),counts?.accounts??0,counts?.files??0).run();
-      console.log('CLEANUP_COUNTS',JSON.stringify({accountsPending:counts?.accounts??0,filesPending:counts?.files??0,failed}));
+      console.log('CLEANUP_COUNTS',JSON.stringify({accountsPending:counts?.accounts??0,filesPending:counts?.files??0,detailsPurged:details.purged,failed}));
       if(failed)throw new Error('Cleanup requires retry.');
     })().catch(async()=>{
       console.error('SCHEDULED_CLEANUP_FAILED');

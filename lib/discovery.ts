@@ -19,9 +19,9 @@ export function bounds(lat: number, lng: number, radius: number) {
 }
 export type PublicSeller = { id: string; name: string; bio: string; place_label: string; lat: number; lng: number; hours: string; status: string; rating: number | null; review_count: number; interest_count: number; recommendation_count: number; place: string | null; portrait: string | null; distance_km?: number };
 export const sellerProjection = `s.id,s.name,s.bio,s.address place_label,s.lat,s.lng,s.hours,s.status,
-  (SELECT AVG(rating) FROM seller_reviews WHERE seller_id=s.id) rating,
-  (SELECT COUNT(*) FROM seller_reviews WHERE seller_id=s.id) review_count,
-  (SELECT COUNT(*) FROM seller_interests WHERE seller_id=s.id) interest_count,
+  (SELECT AVG(r.rating) FROM reviews r JOIN foods f ON f.id=r.food_id WHERE f.seller_id=s.id) rating,
+  (SELECT COUNT(*) FROM reviews r JOIN foods f ON f.id=r.food_id WHERE f.seller_id=s.id) review_count,
+  (SELECT COUNT(DISTINCT i.user_id) FROM interests i JOIN foods f ON f.id=i.food_id WHERE f.seller_id=s.id) interest_count,
   (SELECT COUNT(*) FROM seller_recommendations WHERE seller_id=s.id) recommendation_count,
   CASE WHEN EXISTS(SELECT 1 FROM verification_files vf JOIN seller_verifications v ON v.id=vf.submission_id WHERE v.seller_id=s.id AND v.status='verified' AND vf.kind='public-place' AND vf.state='attached' AND vf.delete_after IS NULL) THEN '/api/public/sellers/'||s.id||'/place' ELSE NULL END place,
   CASE WHEN EXISTS(SELECT 1 FROM verification_files vf JOIN seller_verifications v ON v.id=vf.submission_id WHERE v.seller_id=s.id AND v.status='verified' AND v.portrait_consent=1 AND v.portrait_withdrawn_at IS NULL AND vf.kind='portrait' AND vf.state='attached' AND vf.delete_after IS NULL) THEN '/api/public/sellers/'||s.id||'/portrait' ELSE NULL END portrait`;
@@ -50,10 +50,17 @@ export async function discoverSellers(db: D1Database, url: URL) {
   return { sellers: sellers.slice((q.page-1)*q.limit,q.page*q.limit), total: sellers.length, page: q.page, limit: q.limit, radius: nearby ? q.radius : null };
 }
 export async function sellerDetails(db: D1Database, id: string, url: URL) {
-  const q = z.object({ page: coordinate(1,10000).pipe(z.number().int()).default(1) }).strict().parse(Object.fromEntries(url.searchParams));
+  z.object({ page: coordinate(1,10000).pipe(z.number().int()).default(1) }).strict().parse(Object.fromEntries(url.searchParams));
   const seller = await db.prepare(`SELECT ${sellerProjection} FROM sellers s WHERE s.id=? AND s.status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions sx WHERE sx.seller_id=s.id)`).bind(id).first<PublicSeller>();
   if (!seller) throw new HttpError(404,'Seller unavailable.');
-  const foods = await db.prepare("SELECT id,name,description,price,category,'/api/public/photos/'||id image FROM foods WHERE seller_id=? AND available=1 ORDER BY name,id LIMIT 200").bind(id).all();
-  const reviews = await db.prepare('SELECT name,rating,body,created,updated FROM seller_reviews WHERE seller_id=? ORDER BY created DESC,user_id LIMIT 20 OFFSET ?').bind(id,(q.page-1)*20).all();
-  return { seller, foods: foods.results, reviews: reviews.results, reviewPage: q.page };
+  const foods = await db.prepare("SELECT id,name,description,price,category,'/api/public/photos/'||id image,(SELECT COUNT(*) FROM interests i WHERE i.food_id=foods.id) interest_count,(SELECT AVG(rating) FROM reviews r WHERE r.food_id=foods.id) rating,(SELECT COUNT(*) FROM reviews r WHERE r.food_id=foods.id) review_count FROM foods WHERE seller_id=? AND available=1 ORDER BY name,id LIMIT 200").bind(id).all();
+  return { seller, foods: foods.results };
+}
+export async function foodReviews(db:D1Database,id:string,url:URL) {
+  if(new Set(url.searchParams.keys()).size!==[...url.searchParams.keys()].length)throw new HttpError(400,'Duplicate search parameters.');
+  const q=z.object({page:coordinate(1,10000).pipe(z.number().int()).default(1)}).strict().parse(Object.fromEntries(url.searchParams));
+  const food=await db.prepare("SELECT f.id,(SELECT AVG(rating) FROM reviews WHERE food_id=f.id) rating,(SELECT COUNT(*) FROM reviews WHERE food_id=f.id) review_count FROM foods f JOIN sellers s ON s.id=f.seller_id WHERE f.id=? AND f.available=1 AND s.status='verified' AND EXISTS(SELECT 1 FROM auth_users WHERE id=s.owner AND account_status='active') AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=s.id)").bind(id).first();
+  if(!food)throw new HttpError(404,'Food unavailable.');
+  const reviews=await db.prepare('SELECT name,rating,body,created FROM reviews WHERE food_id=? ORDER BY created DESC,user_id LIMIT 20 OFFSET ?').bind(id,(q.page-1)*20).all();
+  return {food,reviews:reviews.results,page:q.page};
 }

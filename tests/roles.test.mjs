@@ -117,11 +117,11 @@ test('authorization matrix: public reads; buyer/seller/admin routes fail closed'
     assert.equal((await request('/api/seller/photos',cookie,new FormData())).status,403);
   }
   for (const cookie of ['',sellerA.cookie,admin.cookie]) {
-    assert.equal((await request('/api/buyer/interest',cookie,{sellerId:'seller-a'})).status,403);
-    assert.equal((await request('/api/buyer/review',cookie,{sellerId:'seller-a',rating:5,body:'Good'})).status,403);
+    assert.equal((await request('/api/buyer/interest',cookie,{foodId:'food-seller-a'})).status,403);
+    assert.equal((await request('/api/buyer/review',cookie,{foodId:'food-seller-a',rating:5,body:'Good'})).status,403);
   }
-  assert.equal((await request('/api/buyer/interest',buyer.cookie,{sellerId:'seller-a'})).status,200);
-  assert.equal((await request('/api/buyer/review',buyer.cookie,{sellerId:'seller-a',rating:5,body:'Good'})).status,200);
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{foodId:'food-seller-a'})).status,200);
+  assert.equal((await request('/api/buyer/review',buyer.cookie,{foodId:'food-seller-a',rating:5,body:'Good'})).status,200);
   assert.equal((await request('/api/admin/verifications',admin.cookie)).status,200);
   const image = await request('/api/admin/verifications/pending-verification/documents/identity',admin.cookie);
   assert.equal(image.status,200); assert.equal(image.headers.get('cache-control'),'private, no-store'); assert.equal(image.headers.get('content-type'),'image/png');
@@ -136,7 +136,7 @@ test('public and seller projections exclude private data and stored keys', async
   assert.doesNotMatch(JSON.stringify(publicData),forbidden); assert.doesNotMatch(JSON.stringify(dashboard),forbidden);
   assert.equal(dashboard.submission.id,'pending-verification');
   assert.equal((await request('/api/public/photos/food-seller-pending','')).status,404);
-  assert.equal((await request('/api/buyer/interest',buyer.cookie,{sellerId:'seller-pending'})).status,404);
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{foodId:'food-seller-pending'})).status,404);
 });
 
 test('seller ownership is enforced for edits and photo retrieval', async () => {
@@ -274,6 +274,12 @@ async function decision(id,status='verified') {
   const r=await request('/api/admin/decision',admin.cookie,{id,status,note:'Reviewed',eligibility:'adult'});
   assert.equal(r.status,200,await r.clone().text());
 }
+async function stepUp(a=admin) {
+  const counter=Math.floor(Date.now()/30000)+1;
+  await db.prepare('UPDATE admin_mfa SET last_counter=? WHERE user_id=?').bind(counter-1,a.id).run();
+  const r=await request('/api/admin/mfa/verify',a.cookie,{code:otp(a.secret,counter)});
+  assert.equal(r.status,200,await r.clone().text());
+}
 async function cleanup(now,fail=false) {return (await mf.dispatchFetch(origin+'/test/cleanup',{method:'POST',body:JSON.stringify({now,fail})})).json()}
 
 test('required location consent and adult eligibility run before any document storage', async()=>{
@@ -319,15 +325,22 @@ test('all stored images are decoded, oriented, re-encoded and free of ancillary 
   const foodBytes=await (await request((await uploaded.json()).image,a.cookie)).arrayBuffer();assert.equal((await sharp(Buffer.from(foodBytes)).metadata()).exif,undefined);
 });
 
-test('private bucket documents cannot be retrieved through public or seller routes; views are audited',async()=>{
+test('private verification is reveal-only, requires fresh MFA, and audits each reveal',async()=>{
   const a=await applicant('privateaccess');const id=await submit(a);
   const file=await db.prepare("SELECT object_key FROM verification_files WHERE submission_id=? AND kind='nid'").bind(id).first();
   assert.equal(await bucket.get(file.object_key),null);
   for(const cookie of ['',buyer.cookie,a.cookie,sellerB.cookie]) assert.equal((await request(`/api/admin/verifications/${id}/documents/identity`,cookie)).status,403);
   for(const path of ['/api/public/'+file.object_key,'/api/seller/'+file.object_key,`/api/public/sellers/${a.seller}/portrait`,`/api/public/sellers/${a.seller}/place`]) assert.equal((await request(path,a.cookie)).status,404);
+  await db.prepare('UPDATE admin_mfa_sessions SET verified_at=0 WHERE user_id=?').bind(admin.id).run();
+  assert.equal((await request('/api/admin/verifications/ID/documents/identity',admin.cookie)).status,403);
+  const queue=await (await request('/api/admin/verifications',admin.cookie)).json();
+  const listed=queue.queue.find(v=>v.id===id);assert.ok(listed);assert.equal('nid_number' in listed,false);assert.equal('personal_email' in listed,false);assert.doesNotMatch(JSON.stringify(queue),/object_key|nid_ciphertext|nid_iv|1234567890123|sensitive@example/);
+  assert.equal((await request(`/api/admin/verifications/${id}`,admin.cookie)).status,403);
+  await stepUp();
+  const detailResponse=await request(`/api/admin/verifications/${id}`,admin.cookie);assert.equal(detailResponse.status,200);
+  const detail=await detailResponse.json();assert.equal(detail.nid_number,'1234567890123');assert.equal(detail.personal_email,'sensitive@example.com');assert.doesNotMatch(JSON.stringify(detail),/nid_ciphertext|nid_iv|object_key/);
   const image=await request(`/api/admin/verifications/${id}/documents/identity`,admin.cookie);assert.equal(image.status,200);assert.equal(image.headers.get('cache-control'),'private, no-store');
-  const queue=await (await request('/api/admin/verifications',admin.cookie)).json();assert.equal(queue.queue.find(v=>v.id===id).nid_number,'1234567890123');assert.doesNotMatch(JSON.stringify(queue),/object_key|nid_ciphertext|nid_iv/);
-  const events=(await db.prepare('SELECT * FROM audit_log WHERE subject=?').bind(a.seller).all()).results;assert.ok(events.some(e=>e.action==='document_viewed'));assert.ok(events.some(e=>e.action==='verification_viewed'));
+  const events=(await db.prepare('SELECT * FROM audit_log WHERE subject=?').bind(a.seller).all()).results;assert.ok(events.some(e=>e.action==='document_viewed'));assert.ok(events.some(e=>e.action==='verification_details_viewed'));
   assert.doesNotMatch(JSON.stringify(events),/sensitive@example|1234567890123|Never public|nid\//);
   const dashboard=await (await request('/api/seller/dashboard',a.cookie)).text();assert.doesNotMatch(dashboard,/sensitive@example|1234567890123|Never public|object_key|ciphertext|nid_iv|passport_key/);
 });
@@ -342,41 +355,54 @@ test('portrait consent is independent; withdrawal blocks access immediately and 
   assert.equal((await request(`/api/public/sellers/${a.seller}/place`)).status,200);
   await cleanup(new Date().toISOString());
   const files=(await db.prepare('SELECT kind,state,object_key FROM verification_files WHERE submission_id=?').bind(id).all()).results;
-  assert.equal(files.find(f=>f.kind==='portrait').object_key,null);assert.equal(files.find(f=>f.kind==='passport').state,'attached');
+  assert.equal(files.find(f=>f.kind==='portrait').object_key,null);assert.equal(files.find(f=>f.kind==='passport').state,'deleted');assert.equal(files.find(f=>f.kind==='passport').object_key,null);
   assert.equal((await db.prepare('SELECT status FROM sellers WHERE id=?').bind(a.seller).first()).status,'verified');
   const b=await applicant('portraitno');const bid=await submit(b);await decision(bid);
   assert.equal((await request(`/api/public/sellers/${b.seller}/portrait`)).status,404);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM verification_files WHERE submission_id=? AND kind='portrait'").bind(bid).first()).n,0);
 });
 
-test('approval deletes only NID at day 30; keeps passport, encrypted NID and approval record',async()=>{
+test('review decisions immediately purge identity and verification-only details, then delete private photos',async()=>{
   const a=await applicant('approvedretention');const id=await submit(a);await decision(id);
-  const v=await db.prepare('SELECT reviewed_at,retention_due_at FROM seller_verifications WHERE id=?').bind(id).first();
-  assert.equal(Date.parse(v.retention_due_at)-Date.parse(v.reviewed_at),30*86400000);
-  await cleanup(new Date(Date.parse(v.retention_due_at)-1).toISOString());
-  assert.equal((await db.prepare("SELECT state FROM verification_files WHERE submission_id=? AND kind='nid'").bind(id).first()).state,'attached');
-  await cleanup(v.retention_due_at);await cleanup(v.retention_due_at);
+  const v=await db.prepare('SELECT reviewed_at,retention_due_at,review_details_purged_at,legal_name,personal_email,personal_phone,age,gender,home_address,nid_ciphertext,place_address,place_lat,note,decision_note FROM seller_verifications WHERE id=?').bind(id).first();
+  assert.equal(v.retention_due_at,v.reviewed_at);assert.equal(v.review_details_purged_at,v.reviewed_at);
+  assert.equal(v.legal_name,'Private Applicant');assert.equal(v.personal_email,'sensitive@example.com');assert.equal(v.personal_phone,'+8801700000000');
+  for(const key of ['age','gender','home_address','nid_ciphertext','place_address','place_lat','note'])assert.equal(v[key],null,key+' should be purged');
+  assert.equal(v.decision_note,'Reviewed');
+  await stepUp();
+  const preCleanup=await request(`/api/admin/verifications/${id}/documents/identity`,admin.cookie);assert.equal(preCleanup.status,404);
+  await cleanup(new Date(Date.parse(v.reviewed_at)+1).toISOString());
   const docs=(await db.prepare('SELECT kind,state,object_key,deleted_at FROM verification_files WHERE submission_id=?').bind(id).all()).results;
-  assert.equal(docs.find(d=>d.kind==='nid').object_key,null);assert.ok(docs.find(d=>d.kind==='nid').deleted_at);
-  assert.equal(docs.find(d=>d.kind==='passport').state,'attached');assert.equal(docs.find(d=>d.kind==='place').state,'attached');
-  assert.ok((await db.prepare('SELECT nid_ciphertext FROM seller_verifications WHERE id=?').bind(id).first()).nid_ciphertext);
+  for(const kind of ['nid','passport','place']){assert.equal(docs.find(d=>d.kind===kind).object_key,null);assert.ok(docs.find(d=>d.kind===kind).deleted_at);}
+  assert.equal((await db.prepare('SELECT status,decision_note FROM seller_verifications WHERE id=?').bind(id).first()).decision_note,'Reviewed');
 });
 
-test('rejection deadline remains tied to old submission after resubmission; deletes every old document',async()=>{
+test('rejection immediately scrubs private details and queues old photos without affecting a new submission',async()=>{
   const a=await applicant('rejectionretention');const id=await submit(a);await decision(id,'rejected');
-  const due=(await db.prepare('SELECT retention_due_at FROM seller_verifications WHERE id=?').bind(id).first()).retention_due_at;
+  const old=await db.prepare('SELECT retention_due_at,review_details_purged_at,nid_ciphertext,personal_email,decision_note FROM seller_verifications WHERE id=?').bind(id).first();
+  assert.equal(old.retention_due_at,old.review_details_purged_at);assert.equal(old.nid_ciphertext,null);assert.equal(old.personal_email,'sensitive@example.com');
   const fresh=await submit(a);assert.notEqual(id,fresh);
-  assert.equal((await db.prepare('SELECT retention_due_at FROM seller_verifications WHERE id=?').bind(id).first()).retention_due_at,due);
-  await cleanup(due);
+  await cleanup(new Date(Date.parse(old.retention_due_at)+1).toISOString());
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM verification_files WHERE submission_id=? AND object_key IS NOT NULL').bind(id).first()).n,0);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM verification_files WHERE submission_id=? AND object_key IS NOT NULL').bind(fresh).first()).n,3);
   assert.equal((await db.prepare('SELECT decision_note FROM seller_verifications WHERE id=?').bind(id).first()).decision_note,'Reviewed');
 });
 
+test('scheduled scrubber removes decided details reintroduced by a D1 restore',async()=>{
+  const a=await applicant('restorescrub');const id=await submit(a);await decision(id);
+  await db.prepare("UPDATE seller_verifications SET age=25,gender='Other',home_address='restored-home',nid_ciphertext='restored-ciphertext',nid_iv='restored-iv',nid_key_version='v1',place_address='restored-place',place_lat=23,place_lng=90,note='restored-note',review_details_purged_at=NULL,retention_due_at=NULL WHERE id=?").bind(id).run();
+  await db.prepare("UPDATE verification_files SET state='attached',delete_after=NULL,next_attempt_at=NULL WHERE submission_id=? AND bucket='private' AND object_key IS NOT NULL").bind(id).run();
+  await cleanup(new Date().toISOString());
+  const row=await db.prepare('SELECT age,gender,home_address,nid_ciphertext,nid_iv,nid_key_version,place_address,place_lat,place_lng,note,review_details_purged_at,legal_name,personal_email,personal_phone FROM seller_verifications WHERE id=?').bind(id).first();
+  for(const key of ['age','gender','home_address','nid_ciphertext','nid_iv','nid_key_version','place_address','place_lat','place_lng','note'])assert.equal(row[key],null,key+' restored data should be scrubbed');
+  assert.ok(row.review_details_purged_at);assert.equal(row.legal_name,'Private Applicant');assert.equal(row.personal_email,'sensitive@example.com');assert.equal(row.personal_phone,'+8801700000000');
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM verification_files WHERE submission_id=? AND bucket=\'private\' AND object_key IS NOT NULL').bind(id).first()).n,0);
+});
 test('account deletion revokes access and erases structured data; failed object deletions remain retryable',async()=>{
   const a=await applicant('accountcleanup');const id=await submit(a,fieldsFor({portrait:true}));await decision(id);
-  assert.equal((await request('/api/buyer/interest',buyer.cookie,{sellerId:a.seller})).status,200);
-  assert.equal((await request('/api/buyer/review',buyer.cookie,{sellerId:a.seller,rating:5,body:'Test'})).status,200);
+  await db.prepare('INSERT INTO foods VALUES(?,?,?,?,?,?,?,?)').bind('food-'+a.seller,a.seller,'Rice','Fresh',100,'Home cooking','',1).run();
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{foodId:'food-'+a.seller})).status,200);
+  assert.equal((await request('/api/buyer/review',buyer.cookie,{foodId:'food-'+a.seller,rating:5,body:'Test'})).status,200);
   const files=(await db.prepare('SELECT object_key,bucket FROM verification_files WHERE subject=?').bind(a.seller).all()).results;
   const r=await mf.dispatchFetch(origin+'/test/delete-account',{method:'POST',body:JSON.stringify({userId:a.id,fail:true})});const result=await r.json();
   assert.equal(result.dataDeleted,true);assert.equal(result.filesPending,3);
@@ -384,7 +410,7 @@ test('account deletion revokes access and erases structured data; failed object 
   assert.equal((await request(`/api/public/sellers/${a.seller}/portrait`)).status,404);
   assert.equal((await request(`/api/public/sellers/${a.seller}`)).status,404);
   assert.equal((await request(`/api/admin/verifications/${id}/documents/identity`,admin.cookie)).status,404);
-  for(const [table,column,value] of [['seller_interests','seller_id',a.seller],['seller_reviews','seller_id',a.seller],['seller_verifications','seller_id',a.seller],['auth_users','id',a.id],['auth_accounts','user_id',a.id],['auth_sessions','user_id',a.id]])assert.equal((await db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE ${column}=?`).bind(value).first()).n,0);
+  for(const [table,column,value] of [['interests','food_id','food-'+a.seller],['seller_interests','seller_id',a.seller],['reviews','food_id','food-'+a.seller],['seller_reviews','seller_id',a.seller],['seller_verifications','seller_id',a.seller],['auth_users','id',a.id],['auth_accounts','user_id',a.id],['auth_sessions','user_id',a.id]])assert.equal((await db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE ${column}=?`).bind(value).first()).n,0);
   await cleanup(new Date(Date.now()+120000).toISOString());
   for(const f of files)assert.equal(await (f.bucket==='private'?privateBucket:bucket).get(f.object_key),null);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM verification_files WHERE subject=?').bind(a.seller).first()).n,0);
@@ -508,26 +534,53 @@ test('TOTP verification rejects expired codes and atomically consumes a valid co
 
 
 test('seller engagement is unique under concurrent requests and review editing is explicit and scoped',async()=>{
-  const results=await Promise.all(Array.from({length:8},()=>request('/api/buyer/interest',buyer.cookie,{sellerId:'seller-b'})));
+  await db.prepare('INSERT INTO foods VALUES(?,?,?,?,?,?,?,?)').bind('food-seller-b-second','seller-b','Soup','Fresh',120,'Home cooking','',1).run();
+  const results=await Promise.all(Array.from({length:8},()=>request('/api/buyer/interest',buyer.cookie,{foodId:'food-seller-b'})));
   assert.ok(results.every(r=>r.status===200));
-  assert.equal((await db.prepare("SELECT COUNT(*) n FROM seller_interests WHERE seller_id='seller-b' AND user_id=?").bind(buyer.id).first()).n,1);
-  const reviews=await Promise.all(Array.from({length:8},()=>request('/api/buyer/review',buyer.cookie,{sellerId:'seller-b',rating:4,body:'Fresh food'})));
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM interests WHERE food_id='food-seller-b' AND user_id=?").bind(buyer.id).first()).n,1);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM interests WHERE food_id='food-seller-b-second' AND user_id=?").bind(buyer.id).first()).n,0);
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{foodId:'food-seller-b',interested:'false'})).status,400);
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{foodId:'food-seller-b',interested:false})).status,200);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM interests WHERE food_id='food-seller-b' AND user_id=?").bind(buyer.id).first()).n,0);
+  assert.equal((await (await request('/api/buyer/interests',buyer.cookie)).json()).interests.some(i=>i.food_id==='food-seller-b'),false);
+  assert.equal((await (await request('/api/public/sellers/seller-b')).json()).seller.interest_count,0);
+  assert.equal((await request('/api/buyer/interest',buyer.cookie,{foodId:'food-seller-b',interested:true})).status,200);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM interests WHERE food_id='food-seller-b' AND user_id=?").bind(buyer.id).first()).n,1);
+  const dishes=(await (await request('/api/public/catalogue')).json()).foods.filter(f=>f.seller_id==='seller-b');
+  assert.equal(dishes.find(f=>f.id==='food-seller-b').interest_count,1);
+  assert.equal(dishes.find(f=>f.id==='food-seller-b-second').interest_count,0);
+  const profile=(await (await request('/api/public/sellers/seller-b')).json()).foods;
+  assert.equal(profile.find(f=>f.id==='food-seller-b').interest_count,1);
+  assert.equal(profile.find(f=>f.id==='food-seller-b-second').interest_count,0);
+  const sellerMenu=(await (await request('/api/seller/dashboard',sellerB.cookie)).json()).ownFoods;
+  assert.equal(sellerMenu.find(f=>f.id==='food-seller-b').interest_count,1);
+  assert.equal(sellerMenu.find(f=>f.id==='food-seller-b-second').interest_count,0);
+  const reviews=await Promise.all(Array.from({length:8},()=>request('/api/buyer/review',buyer.cookie,{foodId:'food-seller-b',rating:4,body:'Fresh food'})));
   assert.equal(reviews.filter(r=>r.status===200).length,1);assert.equal(reviews.filter(r=>r.status===409).length,7);
   const second=await account('engagement-second');
-  assert.equal((await request('/api/buyer/review/edit',second.cookie,{sellerId:'seller-b',rating:1,body:'Not mine'})).status,404);
-  assert.equal((await request('/api/buyer/review/edit',buyer.cookie,{sellerId:'seller-b',rating:3,body:'Updated review'})).status,200);
-  const own=await (await request('/api/buyer/reviews/seller-b',buyer.cookie)).json();assert.equal(own.review.rating,3);assert.equal(own.review.body,'Updated review');
+  assert.equal((await request('/api/buyer/review/edit',second.cookie,{foodId:'food-seller-b',rating:1,body:'Not mine'})).status,404);
+  assert.equal((await request('/api/buyer/review/edit',buyer.cookie,{foodId:'food-seller-b',rating:3,body:'Updated review'})).status,200);
+  const own=await (await request('/api/buyer/reviews/food-seller-b',buyer.cookie)).json();assert.equal(own.review.rating,3);assert.equal(own.review.body,'Updated review');
   const detail=await (await request('/api/public/sellers/seller-b')).json();assert.equal(detail.seller.rating,3);assert.equal(detail.seller.review_count,1);assert.equal(detail.seller.interest_count,1);
+  let dishReviews=await (await request('/api/public/foods/food-seller-b/reviews')).json();assert.equal(dishReviews.food.review_count,1);assert.equal(dishReviews.reviews[0].body,'Updated review');
+  assert.equal((await request('/api/public/foods/food-seller-b/reviews?page=1')).status,200);
+  assert.equal((await request('/api/public/foods/food-seller-b/reviews?page=1.5')).status,400);
+  let otherDishReviews=await (await request('/api/public/foods/food-seller-b-second/reviews')).json();assert.equal(otherDishReviews.food.review_count,0);assert.equal(otherDishReviews.reviews.length,0);
   assert.equal((await (await request('/api/seller/dashboard',sellerB.cookie)).json()).interestCount,1);
-  assert.equal((await request('/api/buyer/review',second.cookie,{sellerId:'seller-b',rating:0,body:'bad'})).status,400);
-  assert.equal((await request('/api/buyer/review',second.cookie,{sellerId:'seller-b',rating:1.5,body:'bad'})).status,400);
-  assert.equal((await request('/api/buyer/interest',second.cookie,{sellerId:'seller-b',userId:buyer.id})).status,400);
-  assert.equal((await request('/api/buyer/review/edit',buyer.cookie,{sellerId:'seller-b',rating:3,body:'CSRF'},{Origin:'https://evil.test'})).status,403);
-  await request('/api/buyer/interest',second.cookie,{sellerId:'seller-b'});
-  await request('/api/buyer/review',second.cookie,{sellerId:'seller-b',rating:5,body:'Mine'});
+  assert.equal((await request('/api/buyer/review',second.cookie,{foodId:'food-seller-b',rating:0,body:'bad'})).status,400);
+  assert.equal((await request('/api/buyer/review',second.cookie,{foodId:'food-seller-b',rating:1.5,body:'bad'})).status,400);
+  assert.equal((await request('/api/buyer/interest',second.cookie,{foodId:'food-seller-b',userId:buyer.id})).status,400);
+  assert.equal((await request('/api/buyer/review/edit',buyer.cookie,{foodId:'food-seller-b',rating:3,body:'CSRF'},{Origin:'https://evil.test'})).status,403);
+  await request('/api/buyer/interest',second.cookie,{foodId:'food-seller-b'});
+  await request('/api/buyer/review',second.cookie,{foodId:'food-seller-b',rating:5,body:'Mine'});
+  assert.equal((await request('/api/buyer/review',second.cookie,{foodId:'food-seller-b-second',rating:2,body:'Soup review'})).status,200);
+  dishReviews=await (await request('/api/public/foods/food-seller-b/reviews')).json();otherDishReviews=await (await request('/api/public/foods/food-seller-b-second/reviews')).json();
+  assert.equal(dishReviews.food.review_count,2);assert.ok(dishReviews.reviews.every(review=>review.body!=='Soup review'));
+  assert.equal(otherDishReviews.food.review_count,1);assert.equal(otherDishReviews.reviews[0].body,'Soup review');
+  assert.equal((await (await request('/api/buyer/reviews/food-seller-b-second',second.cookie)).json()).review.body,'Soup review');
   await mf.dispatchFetch(origin+'/test/delete-account',{method:'POST',body:JSON.stringify({userId:second.id})});
-  assert.equal((await db.prepare('SELECT COUNT(*) n FROM seller_interests WHERE user_id=?').bind(second.id).first()).n,0);
-  assert.equal((await db.prepare('SELECT COUNT(*) n FROM seller_reviews WHERE user_id=?').bind(second.id).first()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM interests WHERE user_id=?').bind(second.id).first()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM reviews WHERE user_id=?').bind(second.id).first()).n,0);
 });
 
 test('near-me exact distance filtering precedes pagination, handles antimeridian/poles and excludes unapproved sellers',async()=>{
@@ -599,7 +652,7 @@ test('buyer reports, atomic admin decisions, suspension bypass resistance and re
   assert.equal((await request('/api/seller/profile',a.cookie,{name:'Changed',bio:'Food',address:'Pickup',lat:23,lng:90,hours:'Noon'})).status,403);
   // Even a stale or racing approval cannot bypass the independent suspension.
   await db.prepare("UPDATE sellers SET status='verified' WHERE id=?").bind(a.seller).run();await hidden();
-  assert.equal((await request('/api/buyer/interest',reporter.cookie,{sellerId:a.seller})).status,404);
+  assert.equal((await request('/api/buyer/interest',reporter.cookie,{foodId:'food-'+a.seller})).status,404);
   await submission('suspended-review',a.seller);await decision('suspended-review');assert.equal((await db.prepare('SELECT status FROM sellers WHERE id=?').bind(a.seller).first()).status,'suspended');await hidden();
   assert.equal((await request('/api/admin/suspensions/lift',admin.cookie,{sellerId:a.seller,reason:'Investigation finished; review again'})).status,200);assert.equal((await db.prepare('SELECT status FROM sellers WHERE id=?').bind(a.seller).first()).status,'pending');await hidden();
   const again=await submit(a);await decision(again);assert.equal((await request(`/api/public/sellers/${a.seller}`)).status,200);
@@ -615,10 +668,10 @@ test('persistent API limits are atomic and bounded input, HTTPS and CSRF fail cl
   const race=await Promise.all([1,2].map(()=>request('/api/public/sellers','',undefined,{'CF-Connecting-IP':ip})));assert.deepEqual(race.map(r=>r.status).sort(),[200,429]);assert.ok(Number(race.find(r=>r.status===429).headers.get('retry-after'))>0);
   assert.equal((await request('/api/public/sellers','',undefined,{'CF-Connecting-IP':ip})).status,429);
   const a=await account('boundedbuyer');
-  assert.equal((await request('/api/buyer/review',a.cookie,{sellerId:'seller-b',rating:5,body:'x'.repeat(17000)})).status,413);
-  assert.equal((await request('/api/buyer/review',a.cookie,{sellerId:'seller-b',rating:5,body:'okay'},{'Content-Type':'text/plain'})).status,415);
+  assert.equal((await request('/api/buyer/review',a.cookie,{foodId:'food-seller-b',rating:5,body:'x'.repeat(17000)})).status,413);
+  assert.equal((await request('/api/buyer/review',a.cookie,{foodId:'food-seller-b',rating:5,body:'okay'},{'Content-Type':'text/plain'})).status,415);
   assert.equal((await request('/api/buyer/review',a.cookie,[])).status,400);
-  assert.equal((await request('/api/buyer/review',a.cookie,{sellerId:'seller-b',rating:5,body:'okay'},{'sec-fetch-site':'cross-site'})).status,403);
+  assert.equal((await request('/api/buyer/review',a.cookie,{foodId:'food-seller-b',rating:5,body:'okay'},{'sec-fetch-site':'cross-site'})).status,403);
   assert.equal((await mf.dispatchFetch('http://foodlane.test/api/public/sellers')).status,403);
   assert.equal((await request('/api/public/catalogue?unexpected=1')).status,400);
   assert.equal((await request('/api/admin/reports?page=0',admin.cookie)).status,400);
@@ -655,12 +708,12 @@ test('recommendations persist once per customer, remain separate from reviews an
   assert.equal((await details()).recommendation_count,2);
   assert.equal((await details()).interest_count,0);
   assert.equal((await details()).review_count,0);
-  assert.equal((await request('/api/buyer/interest',first.cookie,{sellerId:sid})).status,200);
-  assert.equal((await request('/api/buyer/review',first.cookie,{sellerId:sid,rating:5,body:'Delicious food, served fresh.'})).status,200);
-  assert.equal((await request('/api/buyer/review/edit',first.cookie,{sellerId:sid,rating:4,body:'Fresh food and a friendly seller.'})).status,200);
+  assert.equal((await request('/api/buyer/interest',first.cookie,{foodId:'food-'+sid})).status,200);
+  assert.equal((await request('/api/buyer/review',first.cookie,{foodId:'food-'+sid,rating:5,body:'Delicious food, served fresh.'})).status,200);
+  assert.equal((await request('/api/buyer/review/edit',first.cookie,{foodId:'food-'+sid,rating:4,body:'Fresh food and a friendly seller.'})).status,200);
   const feedback=await (await request('/api/buyer/feedback/'+sid,first.cookie)).json();
-  assert.equal(feedback.recommended,true);assert.equal(feedback.review.rating,4);
-  assert.equal((await (await request('/api/buyer/feedback/'+sid,second.cookie)).json()).review,null);
+  assert.equal(feedback.recommended,true);assert.equal((await (await request('/api/buyer/reviews/food-'+sid,first.cookie)).json()).review.rating,4);
+  assert.equal((await (await request('/api/buyer/reviews/food-'+sid,second.cookie)).json()).review,null);
   const catalogue=await (await request('/api/public/catalogue')).json();
   const food=catalogue.foods.find(food=>food.seller_id===sid);
   assert.equal(food.recommendation_count,2);assert.equal(food.review_count,1);assert.equal(food.interest_count,1);

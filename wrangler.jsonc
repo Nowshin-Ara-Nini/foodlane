@@ -25,8 +25,7 @@
   "vars": {
     "AUTH_BASE_URL": "https://foodlane.nowshinaranini.workers.dev",
     "AUTH_ALLOW_LOCAL_HTTP": "false",
-    "VERIFICATION_RETENTION_ENABLED": "true",
-    "VERIFICATION_RETENTION_DAYS": "30",
+
     "NID_KEY_VERSION": "v1"
   }
 }

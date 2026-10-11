@@ -6,9 +6,10 @@ import { sanitizeImage } from './image-sanitization';
 export const LOCATION_NOTICE_VERSION = '2026-09-21-v1';
 export interface PrivateEnvironment extends EncryptionEnvironment {
   DB: D1Database; BUCKET?: R2Bucket; PRIVATE_VERIFICATIONS?: R2Bucket; IMAGES?: ImagesBinding;
-  VERIFICATION_RETENTION_ENABLED?: string; VERIFICATION_RETENTION_DAYS?: string;
+
 }
 export type FileRecord = { id: string; object_key: string; bucket: string; kind: string; subject: string; submission_id: string | null; attempts: number };
+type AdminVerificationRecord={id:string;seller_id:string;legal_name:string;age:number|null;gender:string|null;personal_email:string;personal_phone:string;home_address:string|null;nid_ciphertext:string|null;nid_iv:string|null;nid_key_version:string|null;place_address:string|null;place_lat:number|null;place_lng:number|null;note:string|null;status:string;created:string;portrait_consent:number;seller_name:string;has_identity:number;has_passport:number;has_selling:number};
 export function fileBucket(env: PrivateEnvironment, name: string) {
   const bucket = name === 'private' ? env.PRIVATE_VERIFICATIONS : name === 'media' ? env.BUCKET : undefined;
   if (!bucket) throw new HttpError(503, 'Verification storage is unavailable.');
@@ -16,12 +17,6 @@ export function fileBucket(env: PrivateEnvironment, name: string) {
 }
 export function audit(db: D1Database, subject: string, action: string, admin: string | null, now = new Date().toISOString()) {
   return db.prepare('INSERT INTO audit_log (id,subject,action,admin_ref,created_at) VALUES(?,?,?,?,?)').bind(crypto.randomUUID(), subject, action, admin, now);
-}
-export function retentionDue(env: PrivateEnvironment, decisionTime: string) {
-  if (env.VERIFICATION_RETENTION_ENABLED === 'false') return null;
-  const days = Number(env.VERIFICATION_RETENTION_DAYS ?? '30');
-  if (!Number.isInteger(days) || days < 1 || days > 3650) throw new HttpError(503, 'Invalid retention configuration.');
-  return new Date(Date.parse(decisionTime) + days * 86400000).toISOString();
 }
 export async function stageFile(env: PrivateEnvironment, subject: string, submission: string | null, kind: string, bucket: 'private' | 'media', bytes: Uint8Array) {
   const id = crypto.randomUUID(), key = `${kind}/${subject}/${id}.png`, now = new Date();
@@ -75,22 +70,28 @@ export async function submitVerification(env: PrivateEnvironment, sellerId: stri
   }
 }
 
-export async function adminQueue(env: PrivateEnvironment, adminId: string) {
-  const queue = await env.DB.prepare(`SELECT v.id,v.seller_id,v.legal_name,v.age,v.gender,v.personal_email,v.personal_phone,v.home_address,v.place_address,v.place_lat,v.place_lng,v.note,v.status,v.created,v.nid_ciphertext,v.nid_iv,v.nid_key_version,v.portrait_consent,s.name seller_name,
-    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='nid' AND state='attached') has_identity,
-    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='passport' AND state='attached') has_passport,
-    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='place' AND state='attached') has_selling
-    FROM seller_verifications v JOIN sellers s ON s.id=v.seller_id WHERE v.status='pending' ORDER BY v.created LIMIT 100`).all<{ id: string; seller_id: string; nid_ciphertext: string; nid_iv: string; nid_key_version: string }>();
-  if (queue.results.length) await env.DB.batch(queue.results.map(v => audit(env.DB,v.seller_id,'verification_viewed',adminId)));
-  const safe = [];
-  for (const record of queue.results) {
-    const nid = await decryptNid(env, record);
-    const { nid_ciphertext: _ciphertext, nid_iv: _iv, nid_key_version: _version, ...details } = record;
-    void _ciphertext; void _iv; void _version;
-    safe.push({ ...details, nid_number: nid });
-  }
+export async function adminQueue(env: PrivateEnvironment) {
+  const queue = await env.DB.prepare(`SELECT v.id,v.seller_id,v.created,s.name seller_name,
+    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='nid' AND state='attached' AND bucket='private' AND (delete_after IS NULL OR delete_after>strftime('%Y-%m-%dT%H:%M:%fZ','now'))) has_identity,
+    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='passport' AND state='attached' AND bucket='private' AND (delete_after IS NULL OR delete_after>strftime('%Y-%m-%dT%H:%M:%fZ','now'))) has_passport,
+    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='place' AND state='attached' AND bucket='private' AND (delete_after IS NULL OR delete_after>strftime('%Y-%m-%dT%H:%M:%fZ','now'))) has_selling
+    FROM seller_verifications v JOIN sellers s ON s.id=v.seller_id WHERE v.status='pending' ORDER BY v.created LIMIT 100`).all();
   const history = await env.DB.prepare("SELECT v.id,v.status,v.reviewed_at,v.decision_note,s.name seller_name FROM seller_verifications v JOIN sellers s ON s.id=v.seller_id WHERE v.status!='pending' ORDER BY v.reviewed_at DESC LIMIT 100").all();
-  return { queue: safe, reviewHistory: history.results };
+  return { queue: queue.results, reviewHistory: history.results };
+}
+export async function adminVerificationDetails(env: PrivateEnvironment, id: string, adminId: string) {
+  const record = await env.DB.prepare(`SELECT v.id,v.seller_id,v.legal_name,v.age,v.gender,v.personal_email,v.personal_phone,v.home_address,v.nid_ciphertext,v.nid_iv,v.nid_key_version,v.place_address,v.place_lat,v.place_lng,v.note,v.status,v.created,v.portrait_consent,s.name seller_name,
+    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='nid' AND state='attached' AND bucket='private' AND (delete_after IS NULL OR delete_after>strftime('%Y-%m-%dT%H:%M:%fZ','now'))) has_identity,
+    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='passport' AND state='attached' AND bucket='private' AND (delete_after IS NULL OR delete_after>strftime('%Y-%m-%dT%H:%M:%fZ','now'))) has_passport,
+    EXISTS(SELECT 1 FROM verification_files WHERE submission_id=v.id AND kind='place' AND state='attached' AND bucket='private' AND (delete_after IS NULL OR delete_after>strftime('%Y-%m-%dT%H:%M:%fZ','now'))) has_selling
+    FROM seller_verifications v JOIN sellers s ON s.id=v.seller_id WHERE v.id=? AND v.status='pending'`).bind(id).first<AdminVerificationRecord>();
+  if (!record) throw new HttpError(404,'Pending verification not found.');
+  if (!record.nid_ciphertext || !record.nid_iv || !record.nid_key_version) throw new HttpError(409,'Identity evidence is unavailable.');
+  const nid = await decryptNid(env,{id:record.id,nid_ciphertext:record.nid_ciphertext,nid_iv:record.nid_iv,nid_key_version:record.nid_key_version});
+  const { nid_ciphertext:_ciphertext,nid_iv:_iv,nid_key_version:_version,...details } = record;
+  void _ciphertext; void _iv; void _version;
+  await audit(env.DB,record.seller_id,'verification_details_viewed',adminId).run();
+  return { ...details, nid_number:nid };
 }
 export async function privateDocument(env: PrivateEnvironment, id: string, kind: string, adminId: string) {
   const row = await env.DB.prepare(`SELECT f.id,f.subject,f.object_key,f.bucket FROM verification_files f
@@ -125,11 +126,11 @@ export async function withdrawPortrait(env: PrivateEnvironment, sellerId: string
   ]);
 }
 export async function decideVerification(env: PrivateEnvironment, adminId: string, data: { id: string; status: 'verified'|'rejected'; note: string; eligibility: 'adult'|'underage'|'unconfirmed' }) {
-  const v = await env.DB.prepare("SELECT id,seller_id,age,portrait_consent FROM seller_verifications WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM sellers s JOIN auth_users u ON u.id=s.owner WHERE s.id=seller_id AND u.account_status='active')").bind(data.id).first<{ id: string; seller_id: string; age: number; portrait_consent: number }>();
+  const v = await env.DB.prepare("SELECT id,seller_id,age,portrait_consent,place_address,place_lat,place_lng FROM seller_verifications WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM sellers s JOIN auth_users u ON u.id=s.owner WHERE s.id=seller_id AND u.account_status='active')").bind(data.id).first<{ id: string; seller_id: string; age: number; portrait_consent: number; place_address:string; place_lat:number; place_lng:number }>();
   if (!v) throw new HttpError(409, 'This submission has already been reviewed or is unavailable.');
   const underage = data.eligibility === 'underage' || v.age < 18, status = underage ? 'rejected' : data.status;
   if (status === 'verified' && data.eligibility !== 'adult') throw new HttpError(400, 'Confirm the applicant is at least 18 from their evidence before approval.');
-  const decision = crypto.randomUUID(), now = new Date().toISOString(), due = retentionDue(env,now);
+  const decision = crypto.randomUUID(), now = new Date().toISOString(), due = now;
   const staged: string[] = [];
   if (status === 'verified') {
     for (const [source, target] of [['place','public-place'], ...(v.portrait_consent ? [['passport','portrait']] : [])]) {
@@ -143,11 +144,11 @@ export async function decideVerification(env: PrivateEnvironment, adminId: strin
     }
   }
   const statements = [
-    env.DB.prepare("UPDATE seller_verifications SET status=?,reviewed_by=?,reviewed_at=?,decision_note=?,decision_id=?,retention_due_at=? WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM sellers s JOIN auth_users u ON u.id=s.owner WHERE s.id=seller_id AND u.account_status='active')")
-      .bind(status,adminId,now,underage?'Applicants must be at least 18 years old.':data.note,decision,due,v.id),
-    env.DB.prepare(`UPDATE sellers SET status=CASE WHEN EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) THEN 'suspended' ELSE ? END,updated=?,address=(SELECT place_address FROM seller_verifications WHERE id=?),lat=(SELECT place_lat FROM seller_verifications WHERE id=?),lng=(SELECT place_lng FROM seller_verifications WHERE id=?) WHERE id=? AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`)
-      .bind(status,now,v.id,v.id,v.id,v.seller_id,v.id,decision),
-    env.DB.prepare(`UPDATE verification_files SET delete_after=? WHERE submission_id=? AND state='attached' AND (?='rejected' OR kind='nid') AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`).bind(due,v.id,status,v.id,decision),
+    env.DB.prepare("UPDATE seller_verifications SET status=?,reviewed_by=?,reviewed_at=?,decision_note=?,decision_id=?,retention_due_at=?,age=NULL,gender=NULL,home_address=NULL,nid_ciphertext=NULL,nid_iv=NULL,nid_key_version=NULL,place_address=NULL,place_lat=NULL,place_lng=NULL,note=NULL,review_details_purged_at=? WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM sellers s JOIN auth_users u ON u.id=s.owner WHERE s.id=seller_id AND u.account_status='active')")
+      .bind(status,adminId,now,underage?'Applicants must be at least 18 years old.':data.note,decision,due,now,v.id),
+    env.DB.prepare(`UPDATE sellers SET status=CASE WHEN EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) THEN 'suspended' ELSE ? END,updated=?,address=?,lat=?,lng=? WHERE id=? AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`)
+      .bind(status,now,v.place_address,v.place_lat,v.place_lng,v.seller_id,v.id,decision),
+    env.DB.prepare(`UPDATE verification_files SET delete_after=?,next_attempt_at=NULL WHERE submission_id=? AND state='attached' AND bucket='private' AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`).bind(due,v.id,v.id,decision),
     env.DB.prepare(`INSERT INTO audit_log(id,subject,action,admin_ref,created_at) SELECT ?,seller_id,?,?,? FROM seller_verifications WHERE id=? AND decision_id=?`).bind(crypto.randomUUID(),status,adminId,now,v.id,decision),
     // Superseded public copies must not be served after renewed review.
     env.DB.prepare("UPDATE verification_files SET state='deleting',delete_after=?,next_attempt_at=NULL WHERE subject=? AND submission_id!=? AND kind IN ('portrait','public-place') AND deleted_at IS NULL AND EXISTS(SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)").bind(now,v.seller_id,v.id,v.id,decision),

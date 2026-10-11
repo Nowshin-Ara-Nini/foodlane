@@ -5,7 +5,8 @@ import { Check, MessageSquare, ThumbsUp } from 'lucide-react';
 
 type Review = { name?: string; rating: number; body: string; created: string; updated: string };
 type Props = {
-  sellerId: string; sample?: boolean; role: string; returnTo?: string;
+  sellerId: string; foodId?: string; sample?: boolean; role: string; returnTo?: string;
+  showRecommendations?: boolean; showReviews?: boolean;
   onChange?: () => void;
 };
 async function read<T>(url: string, signal: AbortSignal): Promise<T> {
@@ -15,7 +16,7 @@ async function read<T>(url: string, signal: AbortSignal): Promise<T> {
   return value as T;
 }
 
-export default function SellerFeedback({ sellerId, sample = false, role, returnTo, onChange }: Props) {
+export default function SellerFeedback({ sellerId, foodId, sample = false, role, returnTo, showRecommendations = true, showReviews = true, onChange }: Props) {
   const [reviews, setReviews] = useState<Review[]>([]);
   const [reviewCount, setReviewCount] = useState(0);
   const [recommendationCount, setRecommendationCount] = useState(0);
@@ -37,18 +38,18 @@ export default function SellerFeedback({ sellerId, sample = false, role, returnT
     async function load() {
       setLoading(true);
       try {
-        const [publicData, personal] = await Promise.all([
-          read<{ seller: { review_count: number; recommendation_count: number }; reviews: Review[] }>(
-            '/api/public/sellers/' + encodeURIComponent(sellerId) + '?page=' + page, controller.signal),
-          role === 'buyer' ? read<{ review: Review | null; recommended: boolean }>(
-            '/api/buyer/feedback/' + encodeURIComponent(sellerId), controller.signal) : Promise.resolve(null),
+        const [sellerData, foodData, ownReview, personalSeller] = await Promise.all([
+          showRecommendations ? read<{seller:{recommendation_count:number}}>(`/api/public/sellers/${encodeURIComponent(sellerId)}`,controller.signal) : Promise.resolve(null),
+          foodId && showReviews ? read<{food:{review_count:number;rating:number|null};reviews:Review[]}>(`/api/public/foods/${encodeURIComponent(foodId)}/reviews?page=${page}`,controller.signal) : Promise.resolve(null),
+          foodId && role === 'buyer' && showReviews ? read<{review:Review|null}>(`/api/buyer/reviews/${encodeURIComponent(foodId)}`,controller.signal) : Promise.resolve(null),
+          role === 'buyer' && showRecommendations ? read<{recommended:boolean}>(`/api/buyer/feedback/${encodeURIComponent(sellerId)}`,controller.signal) : Promise.resolve(null),
         ]);
         if (controller.signal.aborted) return;
-        setReviews(publicData.reviews);
-        setReviewCount(publicData.seller.review_count);
-        setRecommendationCount(publicData.seller.recommendation_count);
-        setOwn(personal?.review ?? null);
-        setRecommended(personal?.recommended ?? false);
+        setReviews(foodData?.reviews ?? []);
+        setReviewCount(foodData?.food.review_count ?? 0);
+        setRecommendationCount(sellerData?.seller.recommendation_count ?? 0);
+        setOwn(ownReview?.review ?? null);
+        setRecommended(personalSeller?.recommended ?? false);
         setError('');
       } catch (cause) {
         if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load feedback.');
@@ -58,7 +59,7 @@ export default function SellerFeedback({ sellerId, sample = false, role, returnT
     }
     void load();
     return () => controller.abort();
-  }, [sellerId, sample, role, page, revision]);
+  }, [sellerId, foodId, sample, role, page, revision, showRecommendations, showReviews]);
 
   async function post(path: string, payload: object, success: string) {
     setBusy(true); setError(''); setMessage('');
@@ -78,10 +79,10 @@ export default function SellerFeedback({ sellerId, sample = false, role, returnT
 
   return <section className="customer-feedback" aria-label="Customer feedback">
     <div className="feedback-heading"><MessageSquare size={20}/><h2>Customer feedback</h2></div>
-    <p className="feedback-intro">Share your experience with this seller. Reviews, recommendations and interest are separate.</p>
+    <p className="feedback-intro">{foodId?'Share your experience with this dish. Reviews are separate for every dish.':'Recommendations are about the seller; reviews are about individual dishes.'}</p>
     {error && <div className="status-message" role="alert">{error} <button type="button" className="filter-clear" onClick={() => setRevision(value => value + 1)}>Refresh feedback</button></div>}
     {message && <p className="feedback-message" role="status">{message}</p>}
-    <div className="recommendation-row">
+    {showRecommendations&&<div className="recommendation-row">
       <div><h3>Would you recommend this seller?</h3><p>{sample ? 'Recommendations are available on real sellers.' : recommendationCount + (recommendationCount === 1 ? ' customer recommends this seller' : ' customers recommend this seller')}</p></div>
       <button type="button" className={'button ' + (recommended ? 'liked' : '')} aria-pressed={recommended}
         disabled={!canSubmit || busy || loading} title={recommended ? 'Remove your recommendation' : 'Recommend this seller'}
@@ -89,11 +90,11 @@ export default function SellerFeedback({ sellerId, sample = false, role, returnT
           const nextRecommended = !recommended;
           if (await post('/api/buyer/recommendation', { sellerId, recommended: nextRecommended }, recommended ? 'Recommendation removed.' : 'Thanks for recommending this seller.')) setRecommended(nextRecommended);
         }}>{recommended ? <Check size={16}/> : <ThumbsUp size={16}/>} {recommended ? 'Recommended' : 'Recommend'}</button>
-    </div>
+    </div>}
     {sample ? <p className="feedback-access-note">This is a sample listing. You can publish reviews and recommendations on real sellers’ dishes and shop pages.</p> :
-      !role ? <p className="feedback-access-note"><Link href={'/auth/login?returnTo=' + encodeURIComponent(returnTo || '/sellers/' + sellerId)}>Sign in as a customer</Link> to write a review or recommend this seller.</p> :
-      role !== 'buyer' ? <p className="feedback-access-note">Customer accounts can write reviews and recommend sellers.</p> : null}
-    <div className="feedback-review-list">
+      !role ? <p className="feedback-access-note"><Link href={'/auth/login?returnTo=' + encodeURIComponent(returnTo || '/sellers/' + sellerId)}>Sign in as a customer</Link> to {foodId?'review this dish':'recommend this seller'}.</p> :
+      role !== 'buyer' ? <p className="feedback-access-note">Customer accounts can {foodId?'review dishes':'recommend sellers'}.</p> : null}
+    {showReviews&&foodId&&<div className="feedback-review-list">
       <h3>Customer reviews</h3>
       {loading ? <p className="muted">Loading feedback…</p> : !reviews.length ? <p className="muted">No customer reviews yet.</p> :
         reviews.map((review, index) => <article className="review" key={review.created + '-' + index}>
@@ -104,13 +105,13 @@ export default function SellerFeedback({ sellerId, sample = false, role, returnT
         <button type="button" className="button" disabled={page === 1 || loading} onClick={() => setPage(value => value - 1)}>Previous</button>
         <span>Page {page}</span><button type="button" className="button" disabled={page * 20 >= reviewCount || loading} onClick={() => setPage(value => value + 1)}>Next</button>
       </div>}
-    </div>
-    {own && !editing ? <div className="feedback-own-review"><h3>Your review</h3><p>{own.rating} / 5 · {own.body}</p>
+    </div>}
+    {showReviews&&foodId&&own && !editing ? <div className="feedback-own-review"><h3>Your review of this dish</h3><p>{own.rating} / 5 · {own.body}</p>
       <button type="button" className="button" disabled={busy || loading} onClick={() => { setRating(own.rating); setBody(own.body); setEditing(true); }}>Edit your review</button></div> :
-      <form className="feedback-form" onSubmit={async event => {
+      showReviews&&foodId&&<form className="feedback-form" onSubmit={async event => {
         event.preventDefault();
         if (!canSubmit) return;
-        if (await post(own ? '/api/buyer/review/edit' : '/api/buyer/review', { sellerId, rating, body }, own ? 'Your review was updated.' : 'Your review was published.')) { setEditing(false); setBody(''); }
+        if (await post(own ? '/api/buyer/review/edit' : '/api/buyer/review', { foodId, rating, body }, own ? 'Your dish review was updated.' : 'Your dish review was published.')) { setEditing(false); setBody(''); }
       }}>
         <h3>{own ? 'Edit your review' : 'Write your review'}</h3>
         <fieldset disabled={!canSubmit || busy || loading}>
@@ -119,7 +120,7 @@ export default function SellerFeedback({ sellerId, sample = false, role, returnT
             {[5,4,3,2,1].map(value => <option key={value} value={value}>{value} / 5</option>)}
           </select></label>
           <label className="field">Your experience<textarea required maxLength={1000} placeholder="How was the food? What should other neighbors know?" value={body} onChange={event => setBody(event.target.value)}/></label>
-          <small>One review and one recommendation per customer per seller. Your display name appears with your review.</small>
+          <small>One review per customer per dish. Recommendations are separate and apply once per seller. Your display name appears with your review.</small>
           <button className="button primary">{busy ? 'Saving…' : own ? 'Save review' : 'Publish review'}</button>
         </fieldset>
         {editing && <button type="button" className="button" disabled={busy} onClick={() => setEditing(false)}>Cancel</button>}

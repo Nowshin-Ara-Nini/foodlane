@@ -48,7 +48,7 @@ test('account deletion and moderation browser interactions handle failures and p
         return json({ filesPending: 2 }, 202);
       }
       if(url.pathname==='/api/admin/accounts')return json({accounts:[{id:'buyer-test',name:'Test buyer',email:'buyer@example.test',role:'buyer',account_status:'active',ban_reason:null}],page:1,total:1,hasMore:false});
-      if(url.pathname==='/api/admin/cleanup')return json({health:null,accounts:{pending:0,retrying:0},files:{pending:0,retrying:0}});
+      if(url.pathname==='/api/admin/cleanup')return json({health:null,accounts:{pending:0,retrying:0},files:{pending:0,retrying:0},verificationDetails:{pending:0}});
       if(url.pathname==='/api/admin/accounts/decision'){
         const body=route.request().postDataJSON();assert.equal(body.userId,'buyer-test');accountDecisions++;
         if(body.action==='ban')return json({error:'Account status changed. Refresh and try again.'},409);

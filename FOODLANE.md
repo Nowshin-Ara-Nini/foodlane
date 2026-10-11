@@ -68,7 +68,7 @@ Live Google consent/callback, Resend delivery and deployed CPU checks require co
 - Sanitize ALL uploads server-side to remove EXIF/GPS metadata before storage/publication.
 - Required unchecked location consent explains public place label/pin/photo and recommends nearby pickup points for home cooks.
 - Separate optional unchecked portrait consent permits only a sanitized public copy. Withdrawal blocks access immediately and deletes that copy. The passport original remains private; NID photos never become public.
-- Retention enabled, 30 days by default: delete approved NID photos; retain approved passport, encrypted NID, approval record and structured fields until account deletion. Delete all rejected-submission documents 30 days after rejection. Resubmission does not extend earlier deadlines.
+- Verification review immediately erases NID ciphertext and verification-only details; legal name and personal contact fields remain until account deletion. Private originals are queued for deletion, with retries and restore-time scrubbing.
 - Account deletion revokes access and deletes all files, derivatives and sensitive records; retain only minimal audit events. Retry failures and do not claim completion until finished.
 - Mandatory admin TOTP, including Google sessions; buyer-only seller-level interest/reviews with database uniqueness; reporting and suspension.
 

@@ -29,9 +29,9 @@ test('discovery ranks recommendations and interest independently, excluding samp
   assert.equal(shops[0].seller_id,'liked');
 });
 test('dish feedback is visible for samples and signed-out visitors with honest publishing restrictions',()=>{
-  const sample=renderToStaticMarkup(React.createElement(Feedback,{sellerId:'sample',sample:true,role:'buyer'}));
+  const sample=renderToStaticMarkup(React.createElement(Feedback,{sellerId:'sample',foodId:'sample-food',sample:true,role:'buyer'}));
   assert.match(sample,/Customer feedback/);assert.match(sample,/Recommend/);assert.match(sample,/Write your review/);
   assert.match(sample,/fieldset disabled/);assert.match(sample,/sample listing/);
-  const guest=renderToStaticMarkup(React.createElement(Feedback,{sellerId:'real',role:'',returnTo:'/discover'}));
+  const guest=renderToStaticMarkup(React.createElement(Feedback,{sellerId:'real',foodId:'real-food',role:'',returnTo:'/discover'}));
   assert.match(guest,/Sign in as a customer/);assert.match(guest,/returnTo=%2Fdiscover/);assert.match(guest,/Customer reviews/);
 });

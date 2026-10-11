@@ -21,6 +21,24 @@
 # misc
 .DS_Store
 *.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.secret
+*.credentials
+**/*service-account*.json
+**/*credentials*.json
+**/secrets/
+**/credentials/
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.dump
+*.sql.gz
+/backups/
 
 # debug
 npm-debug.log*
@@ -28,8 +46,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# Environment and local credentials. Only the sanitized, non-secret template may be tracked.
 .env*
+!.env.example
+.dev.vars*
 
 # vercel
 .vercel
@@ -46,7 +66,4 @@ next-env.d.ts
 /work/
 
 *.tsbuildinfo
-!.env.example
-.dev.vars*
-
-.env.production*
+/lib/

@@ -3,15 +3,15 @@ import { sqliteTable, text, integer, real, index, uniqueIndex } from 'drizzle-or
 
 export const sellerVerifications = sqliteTable('seller_verifications', {
   id: text('id').primaryKey(), sellerId: text('seller_id').notNull(),
-  legalName: text('legal_name').notNull(), age: integer('age').notNull(), gender: text('gender').notNull(),
-  personalEmail: text('personal_email').notNull(), personalPhone: text('personal_phone').notNull(), homeAddress: text('home_address').notNull(),
-  nidCiphertext: text('nid_ciphertext').notNull(), nidIv: text('nid_iv').notNull(), nidKeyVersion: text('nid_key_version').notNull(),
-  placeAddress: text('place_address').notNull(), placeLat: real('place_lat').notNull(), placeLng: real('place_lng').notNull(),
-  note: text('note').notNull(), status: text('status').notNull().default('pending'), created: text('created').notNull(),
+  legalName: text('legal_name').notNull(), age: integer('age'), gender: text('gender'),
+  personalEmail: text('personal_email').notNull(), personalPhone: text('personal_phone').notNull(), homeAddress: text('home_address'),
+  nidCiphertext: text('nid_ciphertext'), nidIv: text('nid_iv'), nidKeyVersion: text('nid_key_version'),
+  placeAddress: text('place_address'), placeLat: real('place_lat'), placeLng: real('place_lng'),
+  note: text('note'), status: text('status').notNull().default('pending'), created: text('created').notNull(),
   locationNoticeVersion: text('location_notice_version').notNull(), locationAcceptedAt: text('location_accepted_at').notNull(),
   portraitConsent: integer('portrait_consent').notNull().default(0), portraitConsentAt: text('portrait_consent_at'), portraitWithdrawnAt: text('portrait_withdrawn_at'),
   reviewedBy: text('reviewed_by'), reviewedAt: text('reviewed_at'), decisionNote: text('decision_note'), decisionId: text('decision_id'),
-  retentionDueAt: text('retention_due_at'),
+  retentionDueAt: text('retention_due_at'), reviewDetailsPurgedAt: text('review_details_purged_at'),
 }, t => [index('idx_private_verification_seller').on(t.sellerId, t.created), uniqueIndex('idx_one_pending_submission').on(t.sellerId).where(sql`${t.status} = 'pending'`)]);
 
 // Keys live only here. Rows with delete_after are durable, retryable deletion jobs.

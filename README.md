@@ -1,50 +1,120 @@
-﻿# Foodlane
+# Foodlane
 
-Existing food-discovery app: React 19, TypeScript, Vinext/Vite, Tailwind, shadcn/ui, Lucide, Cloudflare Workers, D1/Drizzle and R2. See [FOODLANE.md](FOODLANE.md) for upgrade checkpoints and configuration.
+Foodlane helps people discover nearby food from local cooks and sellers. Customers can explore dishes, search by neighborhood, view seller locations, and share dish reviews or interest. Sellers can publish a menu after their account and selling place are reviewed.
 
-## Local setup
+**Live site:** [foodlane.nowshinaranini.workers.dev](https://foodlane.nowshinaranini.workers.dev)
 
-Use Node >=22.13 and pnpm 11.25.0. On Windows use npm.cmd/npx.cmd if PowerShell blocks script shims.
+## What you can do
+
+- Browse and search food, sellers, and neighborhoods.
+- Explore location-based results and open seller directions in Google Maps.
+- Create a buyer or seller account using Google sign-in.
+- Submit seller identity and selling-place information for private review.
+- Publish, edit, or pause food listings after seller approval.
+- Mark interest and leave reviews for individual dishes; recommend sellers separately.
+- Review seller submissions, moderate accounts, and inspect audit activity from the admin area.
+
+Interest is not an order. Foodlane does not process checkout, payment, or delivery. Seller verification confirms the submitted identity and selling-place details; it is not a food-safety certification.
+
+## Technology
+
+- React 19, TypeScript, Vinext, and Vite
+- Cloudflare Workers for the application runtime
+- Cloudflare D1 with Drizzle ORM for application data
+- Cloudflare R2 and Images for file storage and image processing
+- Supabase Auth for Google sign-in
+- Google Maps for map views and directions
+
+## Run locally
+
+### Requirements
+
+- Node.js 22.13 or newer
+- pnpm 11.25
+
+Install dependencies:
 
 ```sh
-npx --yes pnpm@11.25.0 install --frozen-lockfile
+pnpm install --frozen-lockfile
 ```
 
-Copy `.dev.vars.example` to `.dev.vars`, supply a random auth secret, and configure Resend and Google credentials. Never commit `.dev.vars`. The dev origin is http://localhost:5173; AUTH_BASE_URL must exactly match it. HTTP is allowed only for explicit loopback development.
+Create a local, ignored `.dev.vars` file for development credentials and runtime settings. Do not copy credentials from a shared example file or commit local environment files. Keep the development `AUTH_BASE_URL` aligned with the local site URL and allow insecure HTTP only for loopback development.
+
+For local seller-photo and private-verification flows, initialize the local database and private-storage configuration:
 
 ```sh
-npm run db:migrate:local
+pnpm db:migrate:local
 node scripts/configure-private-local.mjs
-npm run dev
-npm run typecheck
-npm run test:auth
-npm run test:roles
-npm run build
 ```
 
-The built preview uses Wrangler's printed port; update the local base URL when changing ports. Wrangler configuration is in `wrangler.jsonc`. Public deployment is disabled during the six-step upgrade. Replace its D1 placeholder before remote operations.
-
-## Migrations
+Start the development server:
 
 ```sh
-npm run db:generate
-npm run db:migrate:local
-# Only after preparing the intended Cloudflare database:
-npm run db:migrate:remote
+pnpm dev
 ```
 
-Wrangler tracks applied migrations. Fresh databases apply 0000–0005 in order. Do not import legacy ChatGPT identities or plaintext test evidence.
+The usual local URL is `http://localhost:5173`. Use the port printed by the server if it differs.
 
-The application no longer uses Sites authentication or mock identity headers. `.openai/hosting.json` is historical and is not imported by the build. Existing `scripts/sites-env.mjs` only configures local tool-state locations.
+### Google Maps browser key
 
+Map embeds and directions use Google Maps. To enable interactive pin placement with the Google Maps JavaScript API, add a browser key to the ignored `.env.production.local` file:
 
-Step 3 private-data setup, retention operations and deployment checks: [PRIVATE_DATA_RUNBOOK.md](PRIVATE_DATA_RUNBOOK.md). Run `npm run test:privacy` for privacy tests and, after building, `npm run verification:cleanup:local` to dispatch local cleanup. Migration 0006 replaces legacy plaintext test verification and disables legacy unsanitized food photos; do not use it as a migration for real historical identity data.
+```text
+VITE_GOOGLE_MAPS_API_KEY=your-restricted-browser-key
+```
 
+The key is delivered to browsers, so restrict it to the Maps JavaScript API and Foodlane’s HTTP referrers. Never use a private server credential as a browser key. Without it, the app displays Google Maps embeds and supports location entry through coordinates or device location.
 
-Admin setup and step 4 checks: [ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md). Visit `/admin` after operator provisioning; enrollment or session verification happens at `/admin/mfa`. Run `npm run test:admin`, and run `npm run test:admin:built` after building to check the built admin journey.
+## Checks
 
+```sh
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm build
+```
 
-Step 5 maps, public seller pages, near-me search and seller engagement are implemented locally. Migration history now runs through `0008_seller_engagement.sql`; see [DISCOVERY_RUNBOOK.md](DISCOVERY_RUNBOOK.md) for API contracts, migration transfer rules and remaining browser checks. Step 6 and public activation await approval.
+`pnpm verify:release` runs the broader local release checks, including the production build and browser-oriented checks. It does not apply remote migrations, configure production credentials, or verify the deployed service.
 
+## Database and deployment
 
-Step 6 is implemented locally: reports/moderation, email-confirmed account deletion, API limits, security headers, and `/privacy`. Migration history now runs through `0009_abuse_deletion.sql`. Full-project lint issues from earlier checkpoints are resolved. See [SECURITY_RUNBOOK.md](SECURITY_RUNBOOK.md) for the final acceptance record and deployment gates. Do not activate a public route until those gates and the final owner checkpoint are approved.
+Database migrations live in [`drizzle/`](drizzle/). For an intentional production schema change, make and verify a D1 backup before applying migrations:
+
+```sh
+pnpm db:migrate:remote
+```
+
+Build and deploy the Worker with the production configuration and an ignored production secrets file:
+
+```sh
+pnpm build
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js deploy --config dist/server/wrangler.json --secrets-file .env.production
+```
+
+Keep production credentials out of source control. Review the Cloudflare bindings and secret names in the deployment output, then smoke-test the public pages and protected admin routes. The build wrapper removes its local `.dev.vars` preview sidecar after building.
+
+## Security and privacy
+
+- Seller identity evidence is private and visible to authorized reviewers under the app’s MFA controls.
+- After a review decision, the NID number and verification-only details are erased from the active record; private originals are queued for deletion.
+- Public seller locations and images are shown only under the app’s consent and approval rules.
+- Account suspension and deletion are handled through authenticated admin and account controls.
+- Keep backups, environment files, local databases, credentials, and runtime state out of Git.
+
+See [`PRIVATE_DATA_RUNBOOK.md`](PRIVATE_DATA_RUNBOOK.md), [`SECURITY_RUNBOOK.md`](SECURITY_RUNBOOK.md), [`ADMIN_ACCOUNTS_RUNBOOK.md`](ADMIN_ACCOUNTS_RUNBOOK.md), and [`SUPABASE_AUTH_RUNBOOK.md`](SUPABASE_AUTH_RUNBOOK.md) for operational details.
+
+## Project structure
+
+```text
+app/          Application pages and UI
+components/   Shared interface components
+db/           Database schema definitions
+drizzle/      Database migrations
+lib/          Server-side application and domain logic
+scripts/      Development, migration, and release helpers
+tests/        Authentication, authorization, privacy, and feature tests
+```
+
+## Contributing
+
+Keep secrets and personal data out of code, logs, screenshots, fixtures, and pull requests. Before proposing a change, run the checks relevant to it and document any required migration or production configuration change.

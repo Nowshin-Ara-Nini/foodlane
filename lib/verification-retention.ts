@@ -3,6 +3,20 @@ import type { AuthEnvironment } from './auth';
 import { audit, fileBucket, type PrivateEnvironment, type FileRecord } from './private-verification';
 import { deleteSupabaseAccount } from './supabase-auth';
 
+// Re-scrub every decided record that still contains verification-only data. This also
+// repairs rows reintroduced by restoring a pre-purge D1 point-in-time snapshot.
+export async function scrubReviewedVerificationDetails(env:PrivateEnvironment,now=new Date().toISOString(),limit=40){
+  const rows=await env.DB.prepare('SELECT id FROM seller_verifications WHERE reviewed_at IS NOT NULL AND review_details_purged_at IS NULL ORDER BY reviewed_at LIMIT ?').bind(limit).all<{id:string}>();
+  let purged=0;
+  for(const row of rows.results){
+    const result=await env.DB.batch([
+      env.DB.prepare("UPDATE seller_verifications SET age=NULL,gender=NULL,home_address=NULL,nid_ciphertext=NULL,nid_iv=NULL,nid_key_version=NULL,place_address=NULL,place_lat=NULL,place_lng=NULL,note=NULL,review_details_purged_at=?,retention_due_at=? WHERE id=? AND reviewed_at IS NOT NULL AND review_details_purged_at IS NULL").bind(now,now,row.id),
+      env.DB.prepare("UPDATE verification_files SET delete_after=?,next_attempt_at=NULL WHERE submission_id=? AND bucket='private' AND state='attached' AND object_key IS NOT NULL AND EXISTS(SELECT 1 FROM seller_verifications WHERE id=? AND reviewed_at IS NOT NULL)").bind(now,row.id,row.id),
+    ]);
+    purged+=result[0].meta.changes;
+  }
+  return {purged,scanned:rows.results.length};
+}
 // Durable jobs are the file rows themselves. Re-running a successful R2 delete is safe.
 export async function cleanupVerificationFiles(env: PrivateEnvironment, now = new Date().toISOString(), limit = 100) {
   const rows = await env.DB.prepare(`SELECT id,subject,submission_id,kind,bucket,object_key,attempts FROM verification_files

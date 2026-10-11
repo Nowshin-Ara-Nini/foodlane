@@ -30,6 +30,12 @@ export async function requireAdminMfa(db:D1Database,user:AppUser|null){
   if(!await adminMfaVerified(db,admin))throw new HttpError(403,'Complete admin two-factor authentication.');
   return admin;
 }
+export async function requireFreshAdminMfa(db:D1Database,user:AppUser|null,now=Date.now()){
+  const admin=await requireAdminMfa(db,user);
+  const proof=await db.prepare('SELECT verified_at FROM admin_mfa_sessions WHERE session_id=? AND user_id=? AND expires_at>?').bind(admin.sessionId,admin.userId,now).first<{verified_at:number}>();
+  if(!proof||proof.verified_at>now+30000||now-proof.verified_at>5*60*1000)throw new HttpError(403,'Verify your authenticator again before viewing private verification data.');
+  return admin;
+}
 export async function handleAdminMfa(env:AuthEnvironment,user:AppUser,path:string,raw:unknown){
   requireRole(user,'admin');const db=env.DB,now=Date.now();
   const factor=await db.prepare('SELECT secret,enabled,setup_session,setup_expires,last_counter FROM admin_mfa WHERE user_id=?').bind(user.userId).first<Factor>();

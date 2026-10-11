@@ -18,23 +18,25 @@ References: [Leaflet reference](https://leafletjs.com/reference.html), [OpenStre
 | Route | Contract |
 | --- | --- |
 | `GET /api/public/sellers` | Optional paired `lat`/`lng`; `radius` 0.1–100 km (default 5); `page` 1–10000; `limit` 1–100 (default 20). Returns public seller projections, distance when searched, total and pagination. Unknown/duplicate parameters fail validation. |
-| `GET /api/public/sellers/{id}?page=1` | Approved seller, up to 200 available foods and 20 reviews/page. Missing/pending/rejected/suspended sellers return 404. No private verification fields or storage keys. |
-| `GET /api/buyer/interests` | Current buyer's approved seller IDs. |
-| `POST /api/buyer/interest` | `{sellerId}`. Repeated clicks succeed without adding another row. No toggle/removal operation. |
-| `GET /api/buyer/reviews/{sellerId}` | Current buyer's own review or null. |
-| `POST /api/buyer/review` | `{sellerId,rating,body}`. Integer rating 1–5, trimmed body 1–1000 characters. Display name comes from the authenticated account. Duplicate creation returns 409. |
-| `POST /api/buyer/review/edit` | Same payload, but updates only the authenticated buyer's existing review. No existing review returns 404. |
-| `GET /api/seller/dashboard` | Includes `interestCount`, a seller-level total, not a sum across dishes. |
+| `GET /api/public/sellers/{id}` | Approved seller summary and up to 200 available dishes. Dish reviews use the dedicated food-review route below. Missing/pending/rejected/suspended sellers return 404. No private verification fields or storage keys. |
+| `GET /api/buyer/interests` | Current buyer's food IDs with active interest. |
+| `POST /api/buyer/interest` | `{foodId, interested?}`. Adds/removes interest on one available dish; repeats are idempotent. |
+| `GET /api/public/foods/{id}/reviews?page=1` | Recent public reviews and rating/count for one available dish. |
+| `GET /api/buyer/reviews/{foodId}` | Current buyer's own review for that dish, or null. |
+| `POST /api/buyer/review`, `/api/buyer/review/edit` | `{foodId,rating,body}`. One review per buyer per dish; edit only updates that buyer's review of that dish. |
+| `GET /api/buyer/feedback/{sellerId}` | Current buyer's recommendation state for that seller. |
+| `POST /api/buyer/recommendation` | `{sellerId,recommended}`. Recommendations remain once per buyer per seller. |
+| `GET /api/seller/dashboard` | Includes `interestCount` (distinct customers interested in any dish) and each listing's own `interest_count`. |
 
-Buyer mutations require a verified buyer session and same-origin CSRF checks. Sellers/admins cannot post reviews or interest. The catalogue now projects seller-level counts/ratings for every dish. No client-supplied user ID or reviewer name is accepted. General API abuse limits remain step 6 work.
+Buyer mutations require a verified buyer session and same-origin CSRF checks. Sellers/admins cannot post reviews or interest. Dish interest, reviews, ratings, and “On everyone’s mind” ranking are per dish; recommendations remain seller-level. No client-supplied user ID or reviewer name is accepted. General API abuse limits remain step 6 work.
 
 Discovery first restricts SQL candidates by latitude/longitude bounding boxes, splitting across the antimeridian using OR and including all longitudes when the radius reaches a pole. Haversine distance uses Earth radius 6371.0088 km. Exact radius filtering, ascending distance and stable ID tie-breaking precede pagination. Candidates are not prematurely truncated. D1 candidate volume and aggregate-query cost should be load-tested with the intended production dataset before activation.
 
 ## Migration
 
-`drizzle/0008_seller_engagement.sql` adds `seller_interests` and `seller_reviews` with buyer/seller composite primary keys, foreign keys with deletion cascades, rating bounds and lookup/discovery indexes. Previous migrations remain unchanged.
+`drizzle/0008_seller_engagement.sql` added `seller_interests` and `seller_reviews` as a past seller-level design. They remain for migration-history compatibility. Current app reviews use the pre-existing `reviews(food_id,user_id,...)` table, and recommendations use `seller_recommendations`.
 
-The migration merges legacy food-level interests by buyer/seller. Where multiple dish reviews exist, it keeps the latest review (food ID breaks timestamp ties). Only extant buyer accounts are migrated. Legacy engagement rows are cleared after transfer; their tables remain for migration-history compatibility and are no longer written by application routes. Existing profile/food data is preserved. Account cleanup deletes new engagement rows through foreign-key cascades.
+The migration merges legacy food-level interests by buyer/seller. Where multiple dish reviews exist, it keeps the latest review (food ID breaks timestamp ties). Only extant buyer accounts are migrated. Legacy seller-level engagement rows remain for migration-history compatibility but are no longer read or written by application routes. New interest uses the retained `interests(food_id,user_id)` table, which was cleared during migration; old seller-level clicks are not assigned to dishes because their original dish cannot be determined. Account cleanup deletes food-level interest rows explicitly.
 
 Applied to local test D1 successfully:
 

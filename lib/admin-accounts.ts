@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { HttpError } from './permissions';
 import type { FoodlaneEnvironment } from './foodlane-api';
-import { deleteAccountData, cleanupAccountDeletions, cleanupVerificationFiles } from './verification-retention';
+import { deleteAccountData, cleanupAccountDeletions, cleanupVerificationFiles, scrubReviewedVerificationDetails } from './verification-retention';
 
 const id=z.string().min(1).max(100),reason=z.string().trim().min(10).max(1000);
 export async function accountDirectory(db:D1Database,url:URL,admin:string) {
@@ -39,14 +39,15 @@ export async function accountDecision(env:FoodlaneEnvironment,admin:string,raw:u
   return {ok:true};
 }
 export async function cleanupStatus(db:D1Database) {
-  const [health,accounts,files]=await Promise.all([
+  const [health,accounts,files,verificationDetails]=await Promise.all([
     db.prepare("SELECT started_at,completed_at,failed_at,files_pending,accounts_pending FROM cleanup_health WHERE id='cleanup'").first(),
     db.prepare('SELECT COUNT(*) pending,COALESCE(SUM(attempts>0),0) retrying,MIN(created_at) oldest FROM account_deletion_jobs').first(),
     db.prepare('SELECT COUNT(*) pending,COALESCE(SUM(attempts>0),0) retrying FROM verification_files WHERE object_key IS NOT NULL AND delete_after IS NOT NULL').first(),
+    db.prepare('SELECT COUNT(*) pending FROM seller_verifications WHERE reviewed_at IS NOT NULL AND review_details_purged_at IS NULL').first(),
   ]);
-  return {health,accounts,files};
+  return {health,accounts,files,verificationDetails};
 }
 export async function retryCleanup(env:FoodlaneEnvironment) {
-  const accounts=await cleanupAccountDeletions(env),files=await cleanupVerificationFiles(env);
-  return {processed:{accounts,files},...await cleanupStatus(env.DB)};
+  const verificationDetails=await scrubReviewedVerificationDetails(env),accounts=await cleanupAccountDeletions(env),files=await cleanupVerificationFiles(env);
+  return {processed:{verificationDetails,accounts,files},...await cleanupStatus(env.DB)};
 }

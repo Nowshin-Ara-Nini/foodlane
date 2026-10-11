@@ -4,7 +4,7 @@ import { handleFoodlane, type FoodlaneEnvironment } from '../lib/foodlane-api';
 import { handleAuth } from '../lib/auth-handler';
 import { hashPassword, verifyPassword } from 'better-auth/crypto';
 import { encryptNid } from '../lib/nid-crypto';
-import { cleanupVerificationFiles, deleteAccountData, cleanupAccountDeletions } from '../lib/verification-retention';
+import { cleanupVerificationFiles, deleteAccountData, cleanupAccountDeletions, scrubReviewedVerificationDetails } from '../lib/verification-retention';
 import { sanitizeImage } from '../lib/image-sanitization';
 const mail: AuthMail[] = [];
 const worker = {
@@ -28,7 +28,9 @@ const worker = {
         await env.DB.prepare("UPDATE verification_files SET kind='account-delete' WHERE object_key=?").bind(key).run();
         await env.PRIVATE_VERIFICATIONS!.delete(key);
       }} as unknown as R2Bucket;
-      return Response.json(await cleanupVerificationFiles(data.fail?{...env,PRIVATE_VERIFICATIONS:undefined}:data.accountDeleteRace?{...env,PRIVATE_VERIFICATIONS:racedBucket}:env,data.now));
+      const target=data.fail?{...env,PRIVATE_VERIFICATIONS:undefined}:data.accountDeleteRace?{...env,PRIVATE_VERIFICATIONS:racedBucket}:env;
+      const details=await scrubReviewedVerificationDetails(target,data.now);
+      return Response.json({details,...await cleanupVerificationFiles(target,data.now)});
     }
     if(path==='/test/provider-delete') {
       const data=await request.json() as {userId:string;fail?:boolean;retry?:boolean;localFail?:boolean};
