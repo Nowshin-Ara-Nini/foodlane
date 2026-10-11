@@ -45,7 +45,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-
+*.openai
 # Environment and local credentials. Only the sanitized, non-secret template may be tracked.
 .env*
 !.env.example
