@@ -33,6 +33,7 @@ Foodlane is designed around a clear idea: **make it easier to discover local foo
 | Explore seller locations on maps and open directions. | Publish, update, or pause food listings after approval. | Moderate reports and suspend or delete accounts when needed. |
 | Mark interest in individual dishes. | See customer interest and manage profile details. | Review sensitive submissions with fresh MFA and inspect audit history. |
 | Leave a review for a dish or recommend a seller. | Share food with nearby customers. | Review recorded administrator actions. |
+| — | Receive notifications about verification decisions and customer activity; check the header inbox and mark alerts as read. | — |
 
 ### How the experience works
 

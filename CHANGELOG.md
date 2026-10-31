@@ -2,7 +2,7 @@
 
 Foodlane release history. User-facing changes are listed here; deployment configuration and secret values are intentionally excluded.
 
-## [0.2.0] - 2026-11-01
+## [0.1.1] - 2026-11-01
 
 ### Added
 
