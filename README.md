@@ -218,6 +218,11 @@ scripts/      Development, migration, and release helpers
 tests/        Authentication, authorization, privacy, and feature tests
 ```
 
+
+## 📄 License
+
+Foodlane’s source code is released under the [MIT License](LICENSE). The license permits reuse, modification, and redistribution, including commercial use, provided the copyright and license notice are retained. Third-party dependencies and assets remain subject to their own licenses and terms.
+
 ## 🤝 Contributing
 
 Contributions should preserve Foodlane’s privacy and role boundaries. Keep secrets and personal data out of commits, logs, screenshots, and fixtures. For changes to schemas, authentication, storage, or deployment, include the required migration and configuration notes. Run relevant checks and report any checks you could not complete.

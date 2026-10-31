@@ -2,6 +2,7 @@
 
 Foodlane release history. User-facing changes are listed here; deployment configuration and secret values are intentionally excluded.
 
+<<<<<<< HEAD
 ## [0.1.1] - 2026-11-01
 
 ### Added
@@ -16,6 +17,8 @@ Foodlane release history. User-facing changes are listed here; deployment config
 - Rename the seller dashboard heading to “Your dashboard” and move notifications into the header.
 - Keep seller-facing verification history focused on submission and review outcomes, without exposing document-view events.
 
+=======
+>>>>>>> 3aee61861dd084c05664a2a93e2f849cc8f8e638
 ## [0.1.0] - 2026-10-31
 
 First public release of Foodlane, a neighborhood food discovery platform.
