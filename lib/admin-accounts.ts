@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { HttpError } from './permissions';
+import { deliverAuthMail } from './auth';
 import type { FoodlaneEnvironment } from './foodlane-api';
 import { deleteAccountData, cleanupAccountDeletions, cleanupVerificationFiles, scrubReviewedVerificationDetails } from './verification-retention';
 
@@ -16,7 +17,7 @@ export async function accountDirectory(db:D1Database,url:URL,admin:string) {
 export async function accountDecision(env:FoodlaneEnvironment,admin:string,raw:unknown) {
   const data=z.object({userId:id,action:z.enum(['ban','unban','delete']),reason,confirmation:z.string().optional()}).strict().parse(raw);
   if(data.userId===admin)throw new HttpError(400,'You cannot moderate your own account.');
-  const target=await env.DB.prepare("SELECT id,role,account_status FROM auth_users WHERE id=? AND role IN ('buyer','seller')").bind(data.userId).first<{id:string;role:string;account_status:string}>();
+  const target=await env.DB.prepare("SELECT id,email,role,account_status FROM auth_users WHERE id=? AND role IN ('buyer','seller')").bind(data.userId).first<{id:string;email:string;role:string;account_status:string}>();
   if(!target)throw new HttpError(404,'Buyer or seller account unavailable.');
   if(target.account_status==='deleting')throw new HttpError(409,'Account deletion is already in progress.');
   if(data.action==='delete') {
@@ -34,8 +35,10 @@ export async function accountDecision(env:FoodlaneEnvironment,admin:string,raw:u
     env.DB.prepare('DELETE FROM auth_sessions WHERE user_id=?').bind(target.id),
     env.DB.prepare("INSERT INTO audit_log(id,subject,action,admin_ref,created_at) SELECT ?,id,?,?,? FROM auth_users WHERE id=? AND account_status=?")
       .bind(crypto.randomUUID(),banning?'account_banned':'account_unbanned',admin,new Date(now).toISOString(),target.id,banning?'banned':'active'),
+    ...(target.role==='seller'?[env.DB.prepare("INSERT INTO seller_notifications(id,user_id,kind,title,message,created_at) SELECT ?,id,?,?,?,? FROM auth_users WHERE id=? AND account_status=?").bind(crypto.randomUUID(),banning?'account_banned':'account_unbanned',banning?'Seller account banned':'Seller account restored',banning?'An administrator banned your account. Sign-in is disabled. Check your email for information about contacting support.':'An administrator restored your account. You can sign in again.',new Date(now).toISOString(),target.id,banning?'banned':'active')]:[]),
   ]);
   if(!changed[0].meta.changes)throw new HttpError(409,'Account status changed. Refresh and try again.');
+  if(banning&&target.role==='seller')try{await deliverAuthMail(env,{to:target.email,subject:'Foodlane account update',text:'An administrator has banned your Foodlane seller account. Sign-in is disabled. If you believe this is a mistake, contact Foodlane support.'})}catch{console.error('SELLER_ACCOUNT_NOTICE_DELIVERY_FAILED')}
   return {ok:true};
 }
 export async function cleanupStatus(db:D1Database) {

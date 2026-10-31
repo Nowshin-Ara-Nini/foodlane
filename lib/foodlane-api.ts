@@ -186,7 +186,8 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment)
         const seller = await db.prepare("SELECT id FROM sellers WHERE id=? AND status='verified' AND owner!=? AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id)").bind(data.sellerId,user!.userId).first();
         if (!seller) throw new HttpError(404,'Seller unavailable.');
         if(data.recommended) {
-          await db.prepare("INSERT INTO seller_recommendations(seller_id,user_id,created) SELECT id,?,? FROM sellers WHERE id=? AND status='verified' AND owner!=? AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) ON CONFLICT(seller_id,user_id) DO NOTHING").bind(user!.userId,now,data.sellerId,user!.userId).run();
+          const inserted = await db.prepare("INSERT INTO seller_recommendations(seller_id,user_id,created) SELECT id,?,? FROM sellers WHERE id=? AND status='verified' AND owner!=? AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) ON CONFLICT(seller_id,user_id) DO NOTHING").bind(user!.userId,now,data.sellerId,user!.userId).run();
+          if (inserted.meta.changes) await db.prepare("INSERT INTO seller_notifications(id,user_id,kind,title,message,created_at) SELECT ?,s.owner,'recommendation','A customer recommended your shop','A customer recommended your seller profile.',? FROM sellers s JOIN auth_users u ON u.id=s.owner WHERE s.id=? AND u.account_status='active'").bind(crypto.randomUUID(),now,data.sellerId).run();
         } else {
           await db.prepare('DELETE FROM seller_recommendations WHERE seller_id=? AND user_id=?').bind(data.sellerId,user!.userId).run();
         }
@@ -203,7 +204,8 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment)
           const food = await db.prepare("SELECT f.id FROM foods f JOIN sellers s ON s.id=f.seller_id WHERE f.id=? AND f.available=1 AND s.status='verified' AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=s.id) AND s.owner!=?").bind(data.foodId,user!.userId).first();
           if (!food) throw new HttpError(404,'Food unavailable.');
           if (data.interested) {
-            await db.prepare("INSERT INTO interests(food_id,user_id) SELECT f.id,? FROM foods f JOIN sellers s ON s.id=f.seller_id WHERE f.id=? AND f.available=1 AND s.status='verified' AND s.owner!=? AND EXISTS(SELECT 1 FROM auth_users WHERE id=s.owner AND account_status='active') AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=s.id) ON CONFLICT(food_id,user_id) DO NOTHING").bind(user!.userId,data.foodId,user!.userId).run();
+            const inserted = await db.prepare("INSERT INTO interests(food_id,user_id) SELECT f.id,? FROM foods f JOIN sellers s ON s.id=f.seller_id WHERE f.id=? AND f.available=1 AND s.status='verified' AND s.owner!=? AND EXISTS(SELECT 1 FROM auth_users WHERE id=s.owner AND account_status='active') AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=s.id) ON CONFLICT(food_id,user_id) DO NOTHING").bind(user!.userId,data.foodId,user!.userId).run();
+            if (inserted.meta.changes) await db.prepare("INSERT INTO seller_notifications(id,user_id,kind,title,message,created_at) SELECT ?,s.owner,'interest','A customer is interested in your food','A customer is interested in '||f.name||'.',? FROM foods f JOIN sellers s ON s.id=f.seller_id JOIN auth_users u ON u.id=s.owner WHERE f.id=? AND u.account_status='active'").bind(crypto.randomUUID(),now,data.foodId).run();
           } else {
             await db.prepare('DELETE FROM interests WHERE food_id=? AND user_id=?').bind(data.foodId,user!.userId).run();
           }
@@ -217,26 +219,35 @@ export async function handleFoodlane(request: Request, env: FoodlaneEnvironment)
             ? await db.prepare("INSERT INTO reviews(food_id,user_id,name,rating,body,created) SELECT f.id,?,?,?,?,? FROM foods f JOIN sellers s ON s.id=f.seller_id WHERE f.id=? AND f.available=1 AND s.status='verified' AND s.owner!=? AND EXISTS(SELECT 1 FROM auth_users WHERE id=s.owner AND account_status='active') AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=s.id) ON CONFLICT(food_id,user_id) DO NOTHING").bind(user!.userId,user!.name,data.rating,data.body,now,data.foodId,user!.userId).run()
             : await db.prepare("UPDATE reviews SET name=?,rating=?,body=?,created=? WHERE food_id=? AND user_id=? AND EXISTS(SELECT 1 FROM foods f JOIN sellers s ON s.id=f.seller_id WHERE f.id=? AND f.available=1 AND s.status='verified' AND s.owner!=? AND EXISTS(SELECT 1 FROM auth_users WHERE id=s.owner AND account_status='active') AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=s.id))").bind(user!.name,data.rating,data.body,now,data.foodId,user!.userId,data.foodId,user!.userId).run();
           if (!result.meta.changes) throw new HttpError(path === 'review' ? 409 : 404,path === 'review' ? 'A review already exists or food is unavailable. Use Edit review to change your review.' : 'Review unavailable.');
+          if (path === 'review') await db.prepare("INSERT INTO seller_notifications(id,user_id,kind,title,message,created_at) SELECT ?,s.owner,'review','A customer reviewed your food','A customer left a review for '||f.name||'.',? FROM foods f JOIN sellers s ON s.id=f.seller_id JOIN auth_users u ON u.id=s.owner WHERE f.id=? AND u.account_status='active'").bind(crypto.randomUUID(),now,data.foodId).run();
           return json({ok:true});
         }
       }
     }
     if (area === 'seller') {
       const suspension=await db.prepare('SELECT x.reason,x.created FROM seller_suspensions x JOIN sellers s ON s.id=x.seller_id WHERE s.owner=?').bind(user!.userId).first();
-      if(suspension&&request.method==='POST'&&path!=='portrait/withdraw')throw new HttpError(403,'Your seller account is suspended. Contact Foodlane support.');
+      if(suspension&&request.method==='POST'&&!['portrait/withdraw','notifications/read'].includes(path))throw new HttpError(403,'Your seller account is suspended. Contact Foodlane support.');
 
       if (path === 'dashboard' && request.method === 'GET') {
         const seller = await db.prepare('SELECT id,name,bio,address place_label,lat,lng,hours,status,updated FROM sellers WHERE owner=?').bind(user!.userId).first<{ id: string }>();
-        if (!seller) return json({ seller: null, ownFoods: [], submission: null, logs: [] });
+        if (!seller) return json({ seller: null, ownFoods: [], submission: null, logs: [], notifications: [], unreadCount: 0 });
         const foods = await db.prepare(`SELECT id,seller_id,name,description,price,category,available,
           '/api/seller/photos/' || substr(image, length('food/' || seller_id || '/') + 1, 36) AS image,
           (SELECT original_price FROM food_offers WHERE food_id=foods.id) original_price,(SELECT label FROM food_offers WHERE food_id=foods.id) offer_label,
           (SELECT COUNT(*) FROM interests i WHERE i.food_id=foods.id) interest_count,(SELECT AVG(rating) FROM reviews r WHERE r.food_id=foods.id) rating,(SELECT COUNT(*) FROM reviews r WHERE r.food_id=foods.id) review_count FROM foods WHERE seller_id=?`).bind(seller.id).all();
         const submission = await db.prepare('SELECT id,status,created,reviewed_at,decision_note FROM seller_verifications WHERE seller_id=? ORDER BY created DESC,rowid DESC LIMIT 1').bind(seller.id).first();
-        const logs = await db.prepare('SELECT action,created_at AS created FROM audit_log WHERE subject=? ORDER BY created_at DESC LIMIT 100').bind(seller.id).all();
+        const logs = await db.prepare("SELECT action,created_at AS created FROM audit_log WHERE subject=? AND action IN ('submitted','verified','rejected') ORDER BY created_at DESC LIMIT 100").bind(seller.id).all();
         const consent = await db.prepare('SELECT portrait_consent FROM seller_verifications WHERE seller_id=? ORDER BY created DESC LIMIT 1').bind(seller.id).first<{portrait_consent:number}>();
         const interest = await db.prepare('SELECT COUNT(DISTINCT i.user_id) total FROM interests i JOIN foods f ON f.id=i.food_id WHERE f.seller_id=?').bind(seller.id).first<{total:number}>();
-        return json({ suspension, interestCount: interest?.total ?? 0, seller, ownFoods: foods.results, submission, logs: logs.results, portraitConsent: !!consent?.portrait_consent });
+        const notifications = await db.prepare('SELECT id,kind,title,message,created_at,read_at FROM seller_notifications WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 40').bind(user!.userId).all();
+        const unread = await db.prepare('SELECT COUNT(*) total FROM seller_notifications WHERE user_id=? AND read_at IS NULL').bind(user!.userId).first<{total:number}>();
+        return json({ suspension, interestCount: interest?.total ?? 0, seller, ownFoods: foods.results, submission, logs: logs.results, notifications: notifications.results, unreadCount: unread?.total ?? 0, portraitConsent: !!consent?.portrait_consent });
+      }
+      if (path === 'notifications/read' && request.method === 'POST') {
+        const data = z.object({ id: text(100).optional(), all: z.boolean().optional() }).strict().refine(value => Boolean(value.id) !== Boolean(value.all), 'Choose one notification or all notifications.').parse(await input(request));
+        if (data.id) await db.prepare('UPDATE seller_notifications SET read_at=? WHERE id=? AND user_id=? AND read_at IS NULL').bind(now,data.id,user!.userId).run();
+        else await db.prepare('UPDATE seller_notifications SET read_at=? WHERE user_id=? AND read_at IS NULL').bind(now,user!.userId).run();
+        return json({ok:true});
       }
       if (path === 'profile' && request.method === 'POST') {
         const data = profileInput.parse(await input(request));

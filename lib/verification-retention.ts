@@ -1,5 +1,5 @@
 import { fingerprint } from './api-security';
-import type { AuthEnvironment } from './auth';
+import { deliverAuthMail, type AuthEnvironment } from './auth';
 import { audit, fileBucket, type PrivateEnvironment, type FileRecord } from './private-verification';
 import { deleteSupabaseAccount } from './supabase-auth';
 
@@ -51,6 +51,7 @@ export type DeletionResult = {dataDeleted:boolean;filesPending:number|null;delet
 
 // Revoke access and persist intent atomically before either service is changed.
 export async function deleteAccountData(env: PrivateEnvironment & AuthEnvironment, userId: string, feedbackReason: string | null = null, requestedBy: string | null = null): Promise<DeletionResult> {
+  const target = requestedBy ? await env.DB.prepare("SELECT email,role FROM auth_users WHERE id=? AND account_status='active'").bind(userId).first<{email:string;role:string}>() : null;
   const providerRequired = !!(env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL);
   if (providerRequired && !env.SUPABASE_SECRET_KEY) throw new Error('Account deletion is not configured.');
   const now = Date.now();
@@ -62,6 +63,7 @@ export async function deleteAccountData(env: PrivateEnvironment & AuthEnvironmen
     env.DB.prepare(`INSERT INTO audit_log(id,subject,action,admin_ref,created_at) SELECT ?,id,'account_deletion_requested',?,? FROM auth_users WHERE id=? AND account_status='deleting'`).bind(crypto.randomUUID(),requestedBy,new Date(now).toISOString(),userId),
   ]);
   if (!queued[1].meta.changes) throw new Error('Account no longer available.');
+  if (requestedBy && target?.role==='seller') try { await deliverAuthMail(env,{to:target.email,subject:'Foodlane account deletion started',text:'An administrator has started deleting your Foodlane account. Sign-in has been disabled. If you believe this is a mistake, contact Foodlane support.'}) } catch { console.error('SELLER_ACCOUNT_NOTICE_DELIVERY_FAILED') }
   return processDeletionJob(env,userId);
 }
 async function processDeletionJob(env: PrivateEnvironment & AuthEnvironment,userId:string): Promise<DeletionResult> {

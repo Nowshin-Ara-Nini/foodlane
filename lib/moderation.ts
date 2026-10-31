@@ -23,6 +23,7 @@ export async function moderate(db:D1Database,admin:string,raw:unknown) {
     db.prepare(`INSERT INTO seller_suspensions(seller_id,reason,created) SELECT seller_id,?,? FROM seller_reports WHERE id=? AND decision_id=? AND status='suspended' ON CONFLICT DO NOTHING`).bind(data.reason,now,data.id,token),
     db.prepare("UPDATE sellers SET status='suspended',updated=? WHERE id IN (SELECT seller_id FROM seller_reports WHERE id=? AND decision_id=? AND status='suspended')").bind(now,data.id,token),
     db.prepare('INSERT INTO audit_log(id,subject,action,admin_ref,created_at) SELECT ?,seller_id,?,?,? FROM seller_reports WHERE id=? AND decision_id=?').bind(crypto.randomUUID(),data.action==='dismiss'?'report_dismissed':'seller_suspended',admin,now,data.id,token),
+    ...(data.action==='suspend'?[db.prepare("INSERT INTO seller_notifications(id,user_id,kind,title,message,created_at) SELECT ?,s.owner,'account_suspended','Seller account suspended','An administrator suspended your seller account. Selling is paused. Contact Foodlane support if you need help.',? FROM seller_reports r JOIN sellers s ON s.id=r.seller_id JOIN auth_users u ON u.id=s.owner WHERE r.id=? AND r.decision_id=? AND u.account_status='active'").bind(crypto.randomUUID(),now,data.id,token)]:[]),
   ]);
   if(!result[0].meta.changes)throw new HttpError(409,'Report already resolved or unavailable.');
   return {ok:true};
@@ -34,6 +35,7 @@ export async function liftSuspension(db:D1Database,admin:string,raw:unknown) {
     db.prepare("INSERT INTO audit_log(id,subject,action,admin_ref,created_at) SELECT ?,seller_id,'suspension_lifted',?,? FROM seller_suspensions WHERE seller_id=?").bind(crypto.randomUUID(),admin,now,data.sellerId),
     db.prepare("UPDATE sellers SET status='pending',updated=? WHERE id=? AND EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=?)").bind(now,data.sellerId,data.sellerId),
     db.prepare('DELETE FROM seller_suspensions WHERE seller_id=?').bind(data.sellerId),
+    db.prepare("INSERT INTO seller_notifications(id,user_id,kind,title,message,created_at) SELECT ?,s.owner,'suspension_lifted','Seller suspension lifted','Your seller suspension was lifted. Submit a new verification before publishing food again.',? FROM sellers s JOIN auth_users u ON u.id=s.owner WHERE s.id=? AND u.account_status='active'").bind(crypto.randomUUID(),now,data.sellerId),
   ]);
   if(!result[2].meta.changes)throw new HttpError(409,'Suspension already lifted or unavailable.');
   return {ok:true};

@@ -61,6 +61,7 @@ export async function submitVerification(env: PrivateEnvironment, sellerId: stri
       env.DB.prepare("UPDATE verification_files SET state='attached',delete_after=NULL WHERE submission_id=? AND state='staging' AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=?)").bind(id,id),
       env.DB.prepare("UPDATE sellers SET status='pending' WHERE id=? AND NOT EXISTS(SELECT 1 FROM seller_suspensions WHERE seller_id=sellers.id) AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=?)").bind(sellerId,id),
       env.DB.prepare("INSERT INTO audit_log (id,subject,action,created_at) SELECT ?,seller_id,'submitted',? FROM seller_verifications WHERE id=?").bind(crypto.randomUUID(),now,id),
+      env.DB.prepare("INSERT INTO seller_notifications(id,user_id,kind,title,message,created_at) SELECT ?,s.owner,'verification_submitted','Verification submitted','Your seller verification submission is received and waiting for review.',? FROM seller_verifications v JOIN sellers s ON s.id=v.seller_id WHERE v.id=?").bind(crypto.randomUUID(),now,id),
     ]);
     if (!result[0].meta.changes) throw new HttpError(409, 'Account or submission changed. Please refresh.');
   } catch {
@@ -150,6 +151,7 @@ export async function decideVerification(env: PrivateEnvironment, adminId: strin
       .bind(status,now,v.place_address,v.place_lat,v.place_lng,v.seller_id,v.id,decision),
     env.DB.prepare(`UPDATE verification_files SET delete_after=?,next_attempt_at=NULL WHERE submission_id=? AND state='attached' AND bucket='private' AND EXISTS (SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)`).bind(due,v.id,v.id,decision),
     env.DB.prepare(`INSERT INTO audit_log(id,subject,action,admin_ref,created_at) SELECT ?,seller_id,?,?,? FROM seller_verifications WHERE id=? AND decision_id=?`).bind(crypto.randomUUID(),status,adminId,now,v.id,decision),
+    env.DB.prepare(`INSERT INTO seller_notifications(id,user_id,kind,title,message,created_at) SELECT ?,s.owner,?,?,?,? FROM seller_verifications v JOIN sellers s ON s.id=v.seller_id WHERE v.id=? AND v.decision_id=?`).bind(crypto.randomUUID(),status==='verified'?'verification_verified':'verification_rejected',status==='verified'?'Seller account verified':'Seller verification rejected',status==='verified'?'Your seller account is verified. You can publish food from your dashboard.':'Your seller verification was rejected. Open Verification & log in your dashboard to read the reviewer’s decision.',now,v.id,decision),
     // Superseded public copies must not be served after renewed review.
     env.DB.prepare("UPDATE verification_files SET state='deleting',delete_after=?,next_attempt_at=NULL WHERE subject=? AND submission_id!=? AND kind IN ('portrait','public-place') AND deleted_at IS NULL AND EXISTS(SELECT 1 FROM seller_verifications WHERE id=? AND decision_id=?)").bind(now,v.seller_id,v.id,v.id,decision),
   ];

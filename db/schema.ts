@@ -11,4 +11,6 @@ export * from './engagement-schema';
 
 export * from './safety-schema';
 
+export * from './notification-schema';
+
 export const foodOffers=sqliteTable('food_offers',{foodId:text('food_id').primaryKey().references(()=>foods.id,{onDelete:'cascade'}),originalPrice:real('original_price').notNull(),label:text('label').notNull()});
