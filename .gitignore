@@ -68,4 +68,4 @@ next-env.d.ts
 
 *.tsbuildinfo
 /lib/
-/CHANGELOG.md/
+/CHANGELOG.md
